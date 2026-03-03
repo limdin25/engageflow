@@ -245,6 +245,7 @@ Risk Level: LOW
 ## Entry #11 — Activity Timeline display: interleave + dedupe (UI-only)
 
 Date: 2026-03-04
+Commit: fc2ab4e
 Change: Activity Timeline display: dedupe exact duplicates (by id or profile+groupName+action+timestamp), interleave by profile (round-robin), preserve per-profile order. No long runs of same email; no duplicate rows. N=30 for initial display.
 Files:
 - frontend/src/lib/activityTimeline.ts (dedupeActivities, interleaveByProfile)
