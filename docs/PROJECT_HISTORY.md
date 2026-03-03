@@ -17,3 +17,18 @@ Append-only log of significant changes.
 - **Frontend**: Rebuilt successfully.
 
 **Docs**: DISCIPLINE.md, PROJECT_STATE.md created in engageflow/docs/.
+
+---
+
+## 2026-03-03 — Railway Deployment (Contabo DB Preserved)
+
+**Change:** Prepare for Railway with full SQLite DB from Contabo. No migration, no reset.
+
+**Files:**
+- backend/seed/engageflow.db — full DB (1.8MB) from Contabo
+- backend/scripts/bootstrap_db.sh — copy seed to /data if not exists
+- Procfile — bootstrap + uvicorn
+- backend/app.py — ENGAGEFLOW_DB_PATH env, GET /api/db-status
+- .gitignore — *.db-wal, *.db-shm; !backend/seed/engageflow.db
+
+**Verification:** After deploy, GET /api/db-status shows DB path, size > 0, tables populated.

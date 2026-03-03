@@ -1,7 +1,16 @@
 # PROJECT STATE — EngageFlow + Joiner Hybrid
 
-**Last updated:** 2026-03-02
+**Last updated:** 2026-03-03
 **Max 300 lines.**
+
+---
+
+## GitHub & Railway
+
+- Repo: https://github.com/limdin25/engageflow
+- Railway-ready: backend/seed/engageflow.db (Contabo DB preserved), bootstrap_db.sh, Procfile
+- DB path: ENGAGEFLOW_DB_PATH (default /data/engageflow.db on Railway volume)
+- Debug: GET /api/db-status (DB path, size, table counts)
 
 ---
 
