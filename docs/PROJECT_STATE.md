@@ -64,6 +64,14 @@ The system is considered healthy when:
 2. Browser/session state can become stale; profiles require periodic re-auth.
 3. SQLite lock under concurrent writes; backend has retry logic and log buffer.
 
+## DEV Deployment (2026-03-03)
+
+- **Branch:** dev (commit 8e58c34)
+- **Pushed:** Yes (force push; remote dev had diverged)
+- **DEV VPS:** 72.61.147.80, path /docker/engageflow-dev, port 3001
+- **Deploy steps:** `ssh root@72.61.147.80` → `cd /docker/engageflow-dev` → `git pull origin dev` → `docker compose up -d --build`
+- **Health:** `curl -sf http://72.61.147.80:3001/api/health`
+
 ## Dashboard Scheduling UI (2026-03-03)
 
 - **Action Queue:** Returns 30 upcoming actions, round-robin interleaved by profile.
@@ -86,7 +94,7 @@ The system is considered healthy when:
 
 1. Verify profile rotation with 2+ profiles in production.
 2. Verify activity timeline shows rows for all active profiles.
-3. Deploy queue/activity fixes to dev (git push origin dev, docker compose up -d --build).
+3. ~~Deploy queue/activity fixes to dev~~ Done. dev pushed (8e58c34). DEV VPS: manual deploy required (ssh root@72.61.147.80, cd /docker/engageflow-dev, git pull origin dev, docker compose up -d --build).
 4. —
 4. —
 5. —
