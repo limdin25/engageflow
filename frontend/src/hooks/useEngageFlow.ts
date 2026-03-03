@@ -44,9 +44,9 @@ export const useQueue = () =>
   useQuery({
     queryKey: ["queue"],
     queryFn: () => api.getQueue(30),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
-    refetchOnWindowFocus: false,
+    refetchInterval: 10000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 
 export const useLogs = () =>
@@ -62,9 +62,9 @@ export const useActivity = () =>
   useQuery({
     queryKey: ["activity"],
     queryFn: () => api.getActivity(100),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
-    refetchOnWindowFocus: false,
+    refetchInterval: 10000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 
 export const useAnalytics = () =>

@@ -85,6 +85,22 @@ def test_queue_interleaves_profiles(client, seed_multi_profile_queue):
             )
 
 
+def test_queue_endpoint_returns_30_and_interleaves(client, seed_multi_profile_queue):
+    """GET /queue returns up to 30 items and interleaves profiles."""
+    r = client.get("/queue?limit=30")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) <= 30, f"Expected <=30 items, got {len(data)}"
+    assert len(data) >= 4
+    profile_ids = [str(item.get("profileId") or item.get("profile", "")) for item in data]
+    seen = set(profile_ids)
+    if len(seen) >= 2:
+        for i in range(len(profile_ids) - 1):
+            assert profile_ids[i] != profile_ids[i + 1], (
+                f"Adjacent same profile at index {i},{i+1}: {profile_ids[i]}"
+            )
+
+
 def test_queue_api_interleaves(client, seed_multi_profile_queue):
     """GET /queue returns interleaved profiles (no adjacent same profile when alternatives exist)."""
     r = client.get("/queue")
@@ -121,6 +137,30 @@ def test_activity_newest_first(client):
             d0 = datetime.fromisoformat(t0.replace("Z", "+00:00"))
             d1 = datetime.fromisoformat(t1.replace("Z", "+00:00"))
             assert d0 >= d1, f"Activity not newest-first: index {i}={t0} should be >= index {i+1}={t1}"
+    with get_db() as db:
+        db.execute("DELETE FROM activity_feed")
+        db.execute("DELETE FROM profiles")
+        db.commit()
+
+
+def test_activity_endpoint_orders_desc_and_limits(client):
+    """GET /activity returns newest-first (DESC) and respects limit."""
+    with get_db() as db:
+        name = seed_profile(db, "testprofile")
+        seed_activity_feed(db, name, 150, utc=True)
+    r = client.get("/activity?limit=100")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) <= 100, f"Expected <=100 items, got {len(data)}"
+    assert len(data) >= 2
+    for i in range(len(data) - 1):
+        t0 = data[i].get("timestamp") or ""
+        t1 = data[i + 1].get("timestamp") or ""
+        if t0 and t1:
+            from datetime import datetime
+            d0 = datetime.fromisoformat(t0.replace("Z", "+00:00"))
+            d1 = datetime.fromisoformat(t1.replace("Z", "+00:00"))
+            assert d0 >= d1, f"Activity not DESC: index {i}={t0} >= index {i+1}={t1}"
     with get_db() as db:
         db.execute("DELETE FROM activity_feed")
         db.execute("DELETE FROM profiles")

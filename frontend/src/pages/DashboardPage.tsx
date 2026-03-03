@@ -553,6 +553,10 @@ export default function DashboardPage() {
     return true;
   });
   const displayedActivity = activityExpanded ? filteredActivity : filteredActivity.slice(0, 30);
+  const activityLastUpdatedAt = activityQuery.dataUpdatedAt ?? 0;
+  const queueLastUpdatedAt = queueQuery.dataUpdatedAt ?? 0;
+  const newestActivityTs = filteredActivity[0] ? parseServerTimestamp(String(filteredActivity[0].timestamp || "")) : 0;
+  const newestActivityAgeMinutes = Number.isFinite(newestActivityTs) ? (Date.now() - newestActivityTs) / 60000 : Infinity;
 
   const handleExportCSV = () => {
     const csv = "Profile,Group,Action,Timestamp,Post URL\n" +
@@ -710,7 +714,6 @@ export default function DashboardPage() {
           </p>
         </div>
       </div>
-<<<<<<< HEAD
 
       <div className="bg-card border border-border rounded-xl p-5 mb-6">
         <div className="flex items-center gap-2 mb-3">
@@ -748,6 +751,9 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4 text-muted-foreground" />
               <h2 className="text-sm font-semibold text-foreground">Activity Timeline</h2>
+              <span className="text-[11px] text-muted-foreground">
+                Last updated: {activityLastUpdatedAt ? (Math.floor((nowMs - activityLastUpdatedAt) / 1000) < 60 ? `${Math.floor((nowMs - activityLastUpdatedAt) / 1000)}s ago` : `${Math.floor((nowMs - activityLastUpdatedAt) / 60000)}m ago`) : "—"}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <select
@@ -785,6 +791,11 @@ export default function DashboardPage() {
             {displayedActivity.length === 0 && (
               <div className="px-5 py-8 text-sm text-muted-foreground">No activity yet.</div>
             )}
+            {displayedActivity.length > 0 && newestActivityAgeMinutes >= 10 && (
+              <div className="px-5 py-2 text-[11px] text-muted-foreground border-t border-border">
+                No new activity detected in last {Math.floor(newestActivityAgeMinutes)} min. Last: {formatRelativeTime(String(filteredActivity[0]?.timestamp || ""))}
+              </div>
+            )}
           </div>
           {!activityExpanded && filteredActivity.length > 30 && (
             <button
@@ -810,6 +821,9 @@ export default function DashboardPage() {
               <Clock className="w-4 h-4 text-muted-foreground" />
               <h2 className="text-sm font-semibold text-foreground">Action Queue</h2>
               <span className="text-xs text-muted-foreground">({visibleQueue.length} scheduled)</span>
+              <span className="text-[11px] text-muted-foreground">
+                Updated: {queueLastUpdatedAt ? (Math.floor((nowMs - queueLastUpdatedAt) / 1000) < 60 ? `${Math.floor((nowMs - queueLastUpdatedAt) / 1000)}s ago` : `${Math.floor((nowMs - queueLastUpdatedAt) / 60000)}m ago`) : "—"}
+              </span>
               <div className="ml-2 inline-flex items-center rounded-md border border-border bg-background overflow-hidden">
                 <button
                   type="button"

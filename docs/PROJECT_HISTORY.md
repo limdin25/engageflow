@@ -208,3 +208,16 @@ Commit: 8e58c34 (included in Entry #7)
 Reversal: `git revert 8e58c34 --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #9 — Dashboard reliability: auto-refresh + guarantee signal
+
+Date: 2026-03-03
+Change: Activity Timeline and Action Queue auto-update every 10s; refetch on window focus. Added "Last updated: Xs ago" and "No new activity detected in last N min" when newest activity &gt; 10 min. Fixed stray conflict marker in DashboardPage.
+Files: frontend/src/hooks/useEngageFlow.ts, frontend/src/pages/DashboardPage.tsx, backend/tests/test_dashboard_queue_timeline.py
+Tests: pytest backend/tests/ -v (14 passed). Added test_activity_endpoint_orders_desc_and_limits, test_queue_endpoint_returns_30_and_interleaves.
+Verification: Activity/queue refetch every 10s; refetchOnWindowFocus: true; guarantee signal when no new activity.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
