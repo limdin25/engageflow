@@ -14,6 +14,9 @@ FROM nginx:1.27-alpine
 # Remove default nginx config
 RUN rm -f /etc/nginx/conf.d/default.conf
 
+# Limit worker processes to avoid io_setup() failures under Railway resource limits
+COPY frontend/nginx-main.conf /etc/nginx/nginx.conf
+
 # Copy built Vite output
 COPY --from=builder /app/dist /usr/share/nginx/html
 
