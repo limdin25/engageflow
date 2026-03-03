@@ -64,14 +64,16 @@ The system is considered healthy when:
 2. Browser/session state can become stale; profiles require periodic re-auth.
 3. SQLite lock under concurrent writes; backend has retry logic and log buffer.
 
-## DEV Deployment (2026-03-03)
+## DEV Deployment (2026-03-04)
 
-- **Branch:** dev (commit 8e58c34, 7ec6fb3)
-- **Pushed:** Yes (force push; remote dev had diverged)
+- **Branch:** dev (commit TBD)
+- **Pushed:** Yes
 - **Frontend DEV:** https://selfless-renewal-dev.up.railway.app
+- **Backend DEV (Railway):** https://engageflow-dev.up.railway.app
 - **DEV VPS:** 72.61.147.80, path /docker/engageflow-dev, port 3001
 - **Deploy steps:** `ssh root@72.61.147.80` → `cd /docker/engageflow-dev` → `git pull origin dev` → `docker compose up -d --build`
-- **Health:** `curl -sf http://72.61.147.80:3001/api/health`
+- **Health:** `curl -sf http://72.61.147.80:3001/api/health` (VPS) | `curl -sS https://engageflow-dev.up.railway.app/health` (Railway)
+- **Railway DEV automation:** Set `ENGAGEFLOW_AUTOMATION_ENABLED=1` and `ENGAGEFLOW_DB_PATH=/data/engageflow.db` in Railway Variables for backend DEV service. Without these, health returns `running:false` and automation does not execute.
 
 ## Dashboard Scheduling UI (2026-03-03)
 
@@ -119,11 +121,18 @@ The system is considered healthy when:
 
 6. **Queue/activity dashboard fixes [TD-124]:** read_queue limit=30, read_activity limit=100, engine UTC timestamps. TDD tests in backend/tests/.
 
+## Railway DEV Automation (2026-03-04)
+
+- **Problem:** `curl https://engageflow-dev.up.railway.app/health` returned `running:false` — scheduler not started.
+- **Fix:** `ENGAGEFLOW_AUTOMATION_ENABLED=1` (default OFF) auto-starts scheduler in lifespan when DB writable.
+- **DB path:** `ENGAGEFLOW_DB_PATH=/data/engageflow.db` (Railway volume). If not set, backend uses repo default.
+- **TDD:** backend/tests/test_health_automation.py — test_health_running_false_when_disabled, test_health_running_true_when_scheduler_started, test_activity_updates_when_action_executes.
+
 ## Next Actions (max 10)
 
-1. Verify profile rotation with 2+ profiles in production.
-2. Verify activity timeline shows rows for all active profiles.
-3. ~~Deploy queue/activity fixes to dev~~ Done. dev pushed (8e58c34). DEV VPS: manual deploy required (ssh root@72.61.147.80, cd /docker/engageflow-dev, git pull origin dev, docker compose up -d --build).
+1. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
+2. Verify profile rotation with 2+ profiles in production.
+3. Verify activity timeline shows rows for all active profiles.
 4. —
 4. —
 5. —

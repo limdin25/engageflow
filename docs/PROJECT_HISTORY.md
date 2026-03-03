@@ -221,3 +221,21 @@ Verification: Activity/queue refetch every 10s; refetchOnWindowFocus: true; guar
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #10 — Railway DEV automation: ENGAGEFLOW_AUTOMATION_ENABLED + /health
+
+Date: 2026-03-04
+Change: Make Railway DEV backend run automation so health.running=true. Added ENGAGEFLOW_AUTOMATION_ENABLED (default OFF), GET /health with running=engine.is_running, lifespan auto-start when enabled and DB writable. TDD tests for health and activity.
+Files:
+- backend/app.py (ENGAGEFLOW_AUTOMATION_ENABLED, _is_db_writable, lifespan auto-start, GET /health)
+- backend/tests/test_health_automation.py (test_health_running_false_when_disabled, test_health_running_true_when_scheduler_started, test_activity_updates_when_action_executes)
+- docs/PROJECT_STATE.md
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v --maxfail=1 (17 passed)
+Verification: curl https://engageflow-dev.up.railway.app/health after setting ENGAGEFLOW_AUTOMATION_ENABLED=1
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

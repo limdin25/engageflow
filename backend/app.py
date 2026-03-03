@@ -61,6 +61,7 @@ except Exception:
     PLAYWRIGHT_AVAILABLE = False
 
 DB_PATH = Path(os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db")))
+ENGAGEFLOW_AUTOMATION_ENABLED = str(os.environ.get("ENGAGEFLOW_AUTOMATION_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
@@ -179,10 +180,33 @@ def _setup_application_logging() -> None:
 _setup_application_logging()
 
 
+def _is_db_writable() -> bool:
+    """Check if DB path is writable (for automation)."""
+    try:
+        p = Path(DB_PATH)
+        if not p.exists():
+            return p.parent.exists() and os.access(p.parent, os.W_OK)
+        return os.access(str(p), os.W_OK)
+    except Exception:
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.automation_engine = AutomationEngine(DB_PATH, Path(__file__).parent)
     await app.state.automation_engine.recover_after_restart()
+    if ENGAGEFLOW_AUTOMATION_ENABLED:
+        if not _is_db_writable():
+            LOGGER.warning("ENGAGEFLOW_AUTOMATION_ENABLED=1 but DB path %s not writable; scheduler will not auto-start", DB_PATH)
+        else:
+            engine = app.state.automation_engine
+            try:
+                status = await engine.get_status()
+                if not bool((status or {}).get("isRunning")):
+                    await engine.start()
+                    LOGGER.info("Automation scheduler auto-started (ENGAGEFLOW_AUTOMATION_ENABLED=1)")
+            except RuntimeError as exc:
+                LOGGER.warning("Automation auto-start skipped: %s", exc)
     app.state.profile_login_monitor_task = asyncio.create_task(
         _profile_login_monitor_loop(app),
         name="profile-login-monitor",
@@ -306,6 +330,20 @@ def get_db():
 
 def get_automation_engine(request: Request) -> AutomationEngine:
     return request.app.state.automation_engine
+
+
+@app.get("/health")
+async def health(request: Request):
+    """Health check: status=ok, running=engine.is_running."""
+    engine = getattr(request.app.state, "automation_engine", None)
+    if not engine:
+        return {"status": "ok", "running": False}
+    try:
+        status = await engine.get_status()
+        running = bool((status or {}).get("isRunning"))
+    except Exception:
+        running = False
+    return {"status": "ok", "running": running}
 
 
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
