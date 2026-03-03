@@ -2856,7 +2856,7 @@ class AutomationEngine:
                             )
                             result.activity_rows.append({
                                 "id": str(uuid.uuid4()),
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                                 "profileLabel": profile_label,
                                 "profileId": profile_id,
                                 "community": community_url,
@@ -4056,7 +4056,7 @@ class AutomationEngine:
                         profile_for_feed,
                         row.get("community", ""),
                         row.get("result", "Commented"),
-                        row.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                        row.get("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
                         row.get("postUrl", ""),
                     ),
                 )

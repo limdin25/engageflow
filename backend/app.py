@@ -6406,9 +6406,21 @@ def clear_logs():
     return {"success": True, "deleted": deleted}
 
 
+def _normalize_activity_timestamp(ts: str) -> str:
+    """Normalize UTC timestamps: +00:00 -> Z for consistent API output."""
+    if not ts:
+        return ts
+    s = str(ts).strip()
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    if s.endswith("+0000"):
+        return s[:-5] + "Z"
+    return s
+
+
 @app.get("/activity", response_model=List[ActivityEntryModel])
 def read_activity(profile: Optional[str] = None, limit: int = 100):
-    # Show timeline only for currently active profiles.
+    # Show timeline only for currently active profiles. LIMIT 100 enforced.
     query = "SELECT * FROM activity_feed WHERE profile IN (SELECT name FROM profiles)"
     params: List[Any] = []
     if profile:
@@ -6420,7 +6432,12 @@ def read_activity(profile: Optional[str] = None, limit: int = 100):
             query + " ORDER BY rowid DESC LIMIT ?",
             (*params, safe_limit),
         ).fetchall()
-    return [ActivityEntryModel(**dict(row)) for row in rows]
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["timestamp"] = _normalize_activity_timestamp(d.get("timestamp") or "")
+        result.append(ActivityEntryModel(**d))
+    return result
 
 
 @app.post("/maintenance/backfill-dm-activity")

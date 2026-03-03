@@ -44,8 +44,17 @@ def test_activity_api_returns_at_most_100(client, seed_150_activity_items):
 
 
 def test_activity_timestamps_use_utc(client, seed_150_activity_items):
-    """Activity timestamps must be UTC (end with Z or +00:00)."""
+    """Activity timestamps must be UTC (Z or +00:00). API normalizes +00:00 to Z."""
     result = read_activity()
     for item in result:
         ts = getattr(item, "timestamp", "") or ""
-        assert "Z" in ts or "+00:00" in ts, f"timestamp {ts!r} is not UTC"
+        assert ts.endswith("Z") or "+00:00" in ts, f"timestamp {ts!r} is not UTC (expect Z or +00:00)"
+
+
+def test_activity_api_returns_z_suffix(client, seed_150_activity_items):
+    """GET /activity returns timestamps with Z suffix (normalized from +00:00)."""
+    r = client.get("/activity")
+    assert r.status_code == 200
+    for item in r.json():
+        ts = item.get("timestamp") or ""
+        assert ts.endswith("Z") or "+00:00" in ts, f"API timestamp {ts!r} missing UTC suffix"
