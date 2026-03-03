@@ -74,7 +74,6 @@ Files:
 - .gitignore (added backend/.env)
 - All backend, frontend, docs, scripts
 
-<<<<<<< HEAD
 Tests: None
 Verification: Repo accessible, main branch pushed
 Reversal: `git remote remove origin`
@@ -185,9 +184,27 @@ Risk Level: LOW
 
 ---
 
-## Entry #7 — Governance correction: cherry-pick ab6c7e6 to dev + TDD tests
+## Entry #7 — Governance correction (main→dev)
 
 Date: 2026-03-03
-Change: Fix was pushed to main; governance requires dev-first. Cherry-picked ab6c7e6 onto dev, resolved conflicts, added backend TDD tests for queue limit, interleaving, activity newest-first.
-Files: backend/app.py, frontend (api, DashboardPage), backend/tests/test_dashboard_queue_timeline.py
-Verification: pytest backend/tests/test_dashboard_queue_timeline.py -v; DEV VPS deploy
+Change: Fix was pushed to main; governance requires dev-first. Cherry-picked ab6c7e6 onto dev, resolved conflicts.
+Files: backend/app.py, frontend (api, DashboardPage), docs
+Commit: 8e58c34 (Fix dashboard queue/timeline + add backend tests (dev))
+Verification: dev pushed; DEV VPS deploy manual (ssh root@72.61.147.80)
+Reversal: `git revert 8e58c34 --no-edit`
+ReversalTested: No
+Risk Level: LOW
+
+---
+
+## Entry #8 — TDD coverage: queue interleaving + timeline ordering
+
+Date: 2026-03-03
+Change: Added backend tests for queue limit=30, profile interleaving (Robinhood rule), activity newest-first.
+Files: backend/tests/test_dashboard_queue_timeline.py
+Tests: pytest backend/tests/test_dashboard_queue_timeline.py -v (5 passed)
+Verification: test_queue_returns_at_most_30, test_queue_interleaves_profiles, test_queue_api_interleaves, test_activity_newest_first, test_activity_api_newest_first
+Commit: 8e58c34 (included in Entry #7)
+Reversal: `git revert 8e58c34 --no-edit`
+ReversalTested: No
+Risk Level: LOW

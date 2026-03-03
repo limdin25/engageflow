@@ -66,17 +66,46 @@ The system is considered healthy when:
 
 ## DEV Deployment (2026-03-03)
 
-- **Branch:** dev (commit 8e58c34)
+- **Branch:** dev (commit 8e58c34, 7ec6fb3)
 - **Pushed:** Yes (force push; remote dev had diverged)
+- **Frontend DEV:** https://selfless-renewal-dev.up.railway.app
 - **DEV VPS:** 72.61.147.80, path /docker/engageflow-dev, port 3001
 - **Deploy steps:** `ssh root@72.61.147.80` → `cd /docker/engageflow-dev` → `git pull origin dev` → `docker compose up -d --build`
 - **Health:** `curl -sf http://72.61.147.80:3001/api/health`
 
 ## Dashboard Scheduling UI (2026-03-03)
 
-- **Action Queue:** Returns 30 upcoming actions, round-robin interleaved by profile.
-- **Activity Timeline:** Newest first (ORDER BY timestamp DESC), limit 100.
-- **Next Action Countdown:** Format "Next action in 14m 22s", updates every second, "No actions scheduled" when empty.
+**Status:** Deployed to dev. Awaiting Hugo verification.
+
+- **Action Queue:** Up to 30 upcoming actions (queue=30, not capped at 2/6).
+- **Profile interleaving (Robinhood rule):** No two consecutive items from same profile when multiple profiles have actions; single-profile repeats allowed.
+- **Activity Timeline:** Newest first (ORDER BY timestamp DESC); last comment/action at top.
+- **Countdown:** Always visible; ticks every second ("Next action in 14m 22s"); "No actions scheduled" when empty.
+
+### H) DEV UI verification (Hugo)
+
+**URL:** https://selfless-renewal-dev.up.railway.app — Dashboard page.
+
+1. **Action Queue:** Up to 30 items; not capped at 2/6.
+2. **Profile interleaving:** No consecutive same profile when multiple profiles exist.
+3. **Activity Timeline:** Newest activity first; last comment/action at top after refresh.
+4. **Countdown:** Visible; ticks every second or "No actions scheduled" when empty.
+
+**Reply:** "verified" OR "broken: &lt;what is wrong&gt;"
+
+### I) Rollback readiness
+
+**Trigger rollback immediately if ANY occur:**
+- Tests fail
+- Health check fails: `curl -sf http://72.61.147.80:3001/api/health`
+- Scheduler not running
+- DB constraint errors
+- Backend logs contain errors/exceptions within 2 min: `docker logs engageflow-dev-backend --since 2m | grep -i "error|exception"`
+
+**Rollback steps (MANDATORY):**
+1. `git revert HEAD --no-edit`
+2. `git push origin dev`
+3. On Dev VPS: `cd /docker/engageflow-dev` → `git pull origin dev` → `docker compose up -d --build`
 
 ## Recent Fixes (2026-03-03)
 
