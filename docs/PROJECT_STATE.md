@@ -6,6 +6,12 @@ Max 300 lines. Current truth only.
 
 Automation platform for engagement workflows: backend API + automation engine, frontend dashboard.
 
+## GitHub
+
+- Repo: https://github.com/limdin25/engageflow
+- Default branch: main
+- PR #1 (audit fixes): fix/profile-rotation-auth-timing-activity-feed
+
 ## System Status
 
 Working / Partial / Broken
@@ -56,12 +62,19 @@ The system is considered healthy when:
 
 1. Skool.com API changes may break automation.
 2. Browser/session state can become stale; profiles require periodic re-auth.
-3. SQLite lock under concurrent writes; backend has retry logic.
+3. SQLite lock under concurrent writes; backend has retry logic and log buffer.
+
+## Recent Fixes (2026-03-03)
+
+1. Profile rotation: profile_last_attempt updated at top of sync loop (no stuck single account).
+2. Auth marker timing: wait_for_selector replaces blind sleep in app.py and engine.py.
+3. Activity feed: canonical profiles.name used for activity_feed.profile (no name mismatch).
+4. Log buffering: locked-DB log writes buffered and flushed after sync cycle.
 
 ## Next Actions (max 10)
 
-1. —
-2. —
+1. Verify profile rotation with 2+ profiles in production.
+2. Verify activity timeline shows rows for all active profiles.
 3. —
 4. —
 5. —

@@ -62,3 +62,79 @@ Verification: Confirm new format and rules present
 Reversal: `git revert HEAD -- docs/PROJECT_HISTORY.md` (after committing this change)
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #3
+
+Date: 2026-03-03
+Change: GitHub bootstrap — initialized git repo, pushed to https://github.com/limdin25/engageflow
+Files:
+
+- .gitignore (added backend/.env)
+- All backend, frontend, docs, scripts
+
+Tests: None
+Verification: Repo accessible, main branch pushed
+Reversal: `git remote remove origin`
+ReversalTested: No
+Risk Level: LOW
+
+---
+
+## Entry #4
+
+Date: 2026-03-03
+Change: Audit fixes — profile rotation, auth timing, activity feed name, log buffering
+Files:
+
+- backend/app.py
+- backend/automation/engine.py
+
+Tests: None (manual verification)
+Verification: See checklist in PR #1
+
+**A Problem**
+
+- Inbox sync stuck on single profile; auth check failed before DOM ready; activity timeline empty (profile name mismatch); log writes dropped on SQLite lock.
+
+**B Hypotheses**
+
+- profile_last_attempt not updated on error; blind wait insufficient for SPA hydration; activity_feed used profileLabel vs profiles.name; lock contention caused silent log drops.
+
+**C Proof**
+
+- Code audit: profile_last_attempt set after fetch; wait_for_timeout(1800/900) before marker check; profile_label fallback in _persist_activity_rows; _insert_backend_log returns on locked.
+
+**D Acceptance Criteria**
+
+- 2+ profiles rotate across sync; no wait_for_timeout in auth paths; activity_feed.profile = profiles.name; buffered logs flush after sync.
+
+**E Plan**
+
+- Move profile_last_attempt to top of loop; replace with wait_for_selector; use canonical name for activity_feed; add _LOG_BUFFER and _flush_log_buffer.
+
+**F Diffs**
+
+- app.py: profile_last_attempt repositioned, _goto_skool_entry_page wait_for_selector, _LOG_BUFFER, _flush_log_buffer, activity_feed profile resolve.
+- engine.py: validate_session wait_for_selector, _persist_activity_rows profile_for_feed.
+
+**G Tests**
+
+- None automated.
+
+**H Test Plan**
+
+- Manual: run sync with 2+ profiles; check /connect or login check; run automation; query activity_feed; verify buffer flush.
+
+**I Rollback**
+
+- `git revert a105328 --no-edit`
+
+**J Success Metric**
+
+- Profile rotation works; auth validation succeeds; activity timeline populated; no skipped log warnings under load.
+
+Reversal: `git revert a105328 --no-edit`
+ReversalTested: No
+Risk Level: MEDIUM (execution layer, DB writes)
