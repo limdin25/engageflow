@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Users, MessageSquare, Sparkles, Clock, Activity, ChevronDown, ChevronUp, ExternalLink, Download, Key, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useActivity, useAutomationSettings, useCommunities, useProfiles, useQueue, useQueuePreview } from "@/hooks/useEngageFlow";
 import { ApiError, api } from "@/lib/api";
@@ -448,6 +448,20 @@ export default function DashboardPage() {
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
+  const formatNextActionCountdown = (seconds: number) => {
+    const safe = Math.max(0, seconds || 0);
+    if (safe < 60) return `Next action in ${safe}s`;
+    const m = Math.floor(safe / 60);
+    const sec = safe % 60;
+    if (m < 60) return sec > 0 ? `Next action in ${m}m ${sec}s` : `Next action in ${m}m`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    if (h < 24) return rm > 0 ? `Next action in ${h}h ${rm}m` : `Next action in ${h}h`;
+    const d = Math.floor(h / 24);
+    const rh = h % 24;
+    return rh > 0 ? `Next action in ${d}d ${rh}h` : `Next action in ${d}d`;
+  };
+
   const secondsUntilNextMidnight = (() => {
     try {
       const now = new Date(nowMs);
@@ -472,14 +486,14 @@ export default function DashboardPage() {
 
   const nextCountdown = (() => {
     if (!engineStatus?.isRunning || engineStatus?.isPaused) return "Waiting for start";
-    if (connectionRest?.active) return formatCountdown(connectionRest.remainingSeconds);
+    if (connectionRest?.active) return formatNextActionCountdown(connectionRest.remainingSeconds);
     if (isWaitingSchedule) {
       const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
-      if (sec > 0) return formatCountdown(sec);
+      if (sec > 0) return formatNextActionCountdown(sec);
       return "Starting...";
     }
     if (displayActiveTask) return "Executing";
-    if (!nextQueueItem) return emptyQueueReason || "--:--";
+    if (!nextQueueItem) return emptyQueueReason || "No actions scheduled";
     const scheduledMs = parseQueueTimestampMs(
       String(nextQueueItem.scheduledFor || ""),
       String(nextQueueItem.scheduledTime || ""),
@@ -487,13 +501,11 @@ export default function DashboardPage() {
     );
     if (Number.isFinite(scheduledMs)) {
       const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
-      if (secondsLeft <= 0) {
-        return "Starting...";
-      }
-      return formatCountdown(secondsLeft);
+      if (secondsLeft <= 0) return "Starting...";
+      return formatNextActionCountdown(secondsLeft);
     }
     if ((engineStatus.countdownSeconds ?? 0) <= 0) return "Starting...";
-    return formatCountdown(engineStatus.countdownSeconds);
+    return formatNextActionCountdown(engineStatus.countdownSeconds);
   })();
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -543,7 +555,7 @@ export default function DashboardPage() {
     if (activityFilterProfile && item.profile !== activityFilterProfile) return false;
     return true;
   });
-  const displayedActivity = activityExpanded ? filteredActivity : filteredActivity.slice(0, 6);
+  const displayedActivity = activityExpanded ? filteredActivity : filteredActivity.slice(0, 30);
 
   const handleExportCSV = () => {
     const csv = "Profile,Group,Action,Timestamp,Post URL\n" +
@@ -586,7 +598,7 @@ export default function DashboardPage() {
     setTimeout(() => setKeyTestStatus("idle"), 3000);
   };
 
-  const displayedQueue = queueExpanded ? displayQueue : displayQueue.slice(0, 6);
+  const displayedQueue = queueExpanded ? displayQueue : displayQueue.slice(0, 30);
 
   const changeQueueRoundLimit = async (delta: number) => {
     if (!settings || queueRoundSavePending) return;
@@ -776,7 +788,7 @@ export default function DashboardPage() {
               <div className="px-5 py-8 text-sm text-muted-foreground">No activity yet.</div>
             )}
           </div>
-          {!activityExpanded && filteredActivity.length > 6 && (
+          {!activityExpanded && filteredActivity.length > 30 && (
             <button
               onClick={() => setActivityExpanded(true)}
               className="w-full py-2.5 text-xs text-primary hover:bg-muted/50 transition-colors border-t border-border"
@@ -784,7 +796,7 @@ export default function DashboardPage() {
               Show all {filteredActivity.length} activity rows
             </button>
           )}
-          {activityExpanded && filteredActivity.length > 6 && (
+          {activityExpanded && filteredActivity.length > 30 && (
             <button
               onClick={() => setActivityExpanded(false)}
               className="w-full py-2.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors border-t border-border"
@@ -824,7 +836,7 @@ export default function DashboardPage() {
                 </button>
               </div>
             </div>
-            {visibleQueue.length > 6 && (
+            {visibleQueue.length > 30 && (
               <button onClick={() => setQueueExpanded(!queueExpanded)} className="p-1.5 rounded-md hover:bg-muted transition-colors" title={queueExpanded ? "Collapse" : "Expand all"}>
                 {queueExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
               </button>
@@ -866,12 +878,12 @@ export default function DashboardPage() {
               <div className="px-5 py-8 text-sm text-muted-foreground">Queue is empty.</div>
             )}
           </div>
-          {!queueExpanded && visibleQueue.length > 6 && (
+          {!queueExpanded && visibleQueue.length > 30 && (
             <button onClick={() => setQueueExpanded(true)} className="w-full py-2.5 text-xs text-primary hover:bg-muted/50 transition-colors border-t border-border">
               {`Show all ${visibleQueue.length} scheduled actions`}
             </button>
           )}
-          {queueExpanded && visibleQueue.length > 6 && (
+          {queueExpanded && visibleQueue.length > 30 && (
             <button
               onClick={() => setQueueExpanded(false)}
               className="w-full py-2.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors border-t border-border"

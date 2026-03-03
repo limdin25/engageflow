@@ -6569,6 +6569,49 @@ def auto_register_community():
 @app.get("/queue/preview")
 def queue_preview(limit: int = 50, days: int = 2):
     """Read-only projected schedule. No DB writes, no Playwright, no mutation."""
+    items = _get_queue_preview_items(limit=limit, days=days)
+    for item in items:
+        item["isProjected"] = True
+        delta_days = 0
+        dt_parsed = None
+        try:
+            sf = str(item.get("scheduledFor") or "")
+            if sf:
+                dt_parsed = datetime.fromisoformat(sf.replace("Z", "+00:00"))
+                delta_days = (dt_parsed.date() - datetime.now().date()).days
+        except Exception:
+            pass
+        item["dayLabel"] = "Tomorrow" if delta_days == 1 else (dt_parsed.strftime("%a %b %d") if delta_days > 1 and dt_parsed else "")
+        item["actionLabel"] = f"Next eligible post in {item.get('community', 'community')}"
+    return items
+
+
+def _interleave_queue_by_profile(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Round-robin interleave by profile to avoid consecutive same profile."""
+    by_profile: Dict[str, List[Dict[str, Any]]] = {}
+    profile_order: List[str] = []
+    for row in rows:
+        pid = str(row.get("profileId") or "")
+        if pid not in by_profile:
+            by_profile[pid] = []
+            profile_order.append(pid)
+        by_profile[pid].append(row)
+    interleaved: List[Dict[str, Any]] = []
+    while True:
+        took_any = False
+        for pid in profile_order:
+            bucket = by_profile.get(pid) or []
+            if not bucket:
+                continue
+            interleaved.append(bucket.pop(0))
+            took_any = True
+        if not took_any:
+            break
+    return interleaved
+
+
+def _get_queue_preview_items(limit: int, days: int) -> List[Dict[str, Any]]:
+    """Generate projected queue items (shared logic for queue_preview endpoint)."""
     limit = max(1, min(200, limit))
     days = max(1, min(7, days))
     now = datetime.now()
@@ -6580,7 +6623,6 @@ def queue_preview(limit: int = 50, days: int = 2):
         settings_row = db.execute("SELECT value FROM automation_settings WHERE key = 'default'").fetchone()
         keyword_rules_rows = db.execute("SELECT id, keyword, assignedProfileIds FROM keyword_rules WHERE active = 1").fetchall()
 
-    # Build keywords_by_profile for forecast keyword assignment
     _keywords_by_profile: Dict[str, List[tuple]] = {}
     for kr in keyword_rules_rows:
         assigned = str(kr["assignedProfileIds"] or "")
@@ -6603,7 +6645,6 @@ def queue_preview(limit: int = 50, days: int = 2):
         pid = str(row["profileId"] or "")
         communities_by_profile.setdefault(pid, []).append(dict(row))
 
-    # Load rotation pointers from run_state
     rotation_pointers: Dict[str, int] = {}
     run_state_path = Path(__file__).parent / "skool_run_state.json"
     try:
@@ -6616,7 +6657,6 @@ def queue_preview(limit: int = 50, days: int = 2):
     except Exception:
         pass
 
-    # Build per-profile projection state
     profile_states = []
     for prof in profiles:
         pid = str(prof["id"])
@@ -6640,10 +6680,8 @@ def queue_preview(limit: int = 50, days: int = 2):
     if not profile_states:
         return []
 
-    # Generate interleaved projections round-robin across profiles
     items = []
     slot = 0
-    # Track per-day remaining (resets at midnight boundaries)
     day_remaining: Dict[str, int] = {ps["id"]: ps["remaining_today"] for ps in profile_states}
     day_comm_actions: Dict[str, Dict[str, int]] = {ps["id"]: {} for ps in profile_states}
     current_day = now.date()
@@ -6654,24 +6692,17 @@ def queue_preview(limit: int = 50, days: int = 2):
             if len(items) >= limit:
                 break
             pid = ps["id"]
-
-            # Compute projected time for this slot
             projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
             if projected_dt > end_boundary:
                 continue
-
-            # Reset daily counters at day boundary
             proj_day = projected_dt.date()
             if proj_day != current_day:
                 current_day = proj_day
                 for ps2 in profile_states:
                     day_remaining[ps2["id"]] = ps2["daily_cap"]
                     day_comm_actions[ps2["id"]] = {}
-
             if day_remaining[pid] <= 0:
                 continue
-
-            # Find next eligible community using rotation pointer
             comms = ps["communities"]
             found_community = None
             for _ in range(len(comms)):
@@ -6684,26 +6715,14 @@ def queue_preview(limit: int = 50, days: int = 2):
                     continue
                 found_community = c
                 break
-
             if not found_community:
                 continue
-
             cid = str(found_community.get("id") or "")
             day_comm_actions.setdefault(pid, {})[cid] = int(day_comm_actions.get(pid, {}).get(cid, 0) or 0) + 1
             day_remaining[pid] -= 1
-
             display_time = _format_queue_display_time(projected_dt)
             local_tz = now.astimezone().tzinfo
             scheduled_for_iso = projected_dt.replace(tzinfo=local_tz).isoformat(timespec="seconds") if local_tz else projected_dt.isoformat(timespec="seconds")
-
-            day_label = ""
-            delta_days = (projected_dt.date() - now.date()).days
-            if delta_days == 1:
-                day_label = "Tomorrow"
-            elif delta_days > 1:
-                day_label = projected_dt.strftime("%a %b %d")
-
-            # Pick keyword via round-robin
             kw_name = ""
             kw_id = ""
             if ps.get("keywords"):
@@ -6711,7 +6730,6 @@ def queue_preview(limit: int = 50, days: int = 2):
                 kw_id = kw_entry[0]
                 kw_name = kw_entry[1]
                 ps["kw_idx"] += 1
-
             items.append({
                 "id": f"preview-{len(items)}",
                 "profile": ps["name"],
@@ -6725,18 +6743,12 @@ def queue_preview(limit: int = 50, days: int = 2):
                 "scheduledFor": scheduled_for_iso,
                 "priorityScore": 0,
                 "countdown": max(0, int((projected_dt - now).total_seconds())),
-                "isProjected": True,
-                "dayLabel": day_label,
-                "actionLabel": f"Next eligible post in {found_community.get('name', 'community')}",
             })
             added_this_round = True
-
         slot += 1
         if not added_this_round:
-            # All profiles capped for current day - jump to next day boundary
             projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
             next_day_start = datetime.combine(projected_dt.date() + timedelta(days=1), datetime.min.time())
-            # Add 5 seconds past midnight (matches engine reset timing)
             next_day_start = next_day_start.replace(second=5)
             jump_seconds = (next_day_start - now).total_seconds()
             if jump_seconds <= 0:
@@ -6745,7 +6757,6 @@ def queue_preview(limit: int = 50, days: int = 2):
             if new_slot <= slot:
                 break
             slot = new_slot
-            # Reset daily counters
             current_day = next_day_start.date()
             for ps2 in profile_states:
                 day_remaining[ps2["id"]] = ps2["daily_cap"]
@@ -6753,14 +6764,14 @@ def queue_preview(limit: int = 50, days: int = 2):
             continue
         max_slots = int((end_boundary - now).total_seconds() / step_seconds) + limit
         if slot > max_slots:
-            # Safety valve: don't exceed the forecast window
             break
-
     return items
 
 
 @app.get("/queue", response_model=List[QueueItemModel])
-def read_queue(profile_id: Optional[str] = None):
+def read_queue(profile_id: Optional[str] = None, limit: int = 30):
+    """Return up to 30 upcoming actions, sorted by scheduled time, interleaved by profile."""
+    limit = max(1, min(100, int(limit or 30)))
     query = "SELECT * FROM queue_items"
     params: List[Any] = []
     if profile_id:
@@ -6769,27 +6780,13 @@ def read_queue(profile_id: Optional[str] = None):
     with get_db() as db:
         rows = db.execute(query + " ORDER BY julianday(scheduledFor) ASC, id ASC", params).fetchall()
     ordered_rows = [dict(row) for row in rows]
-    # Dashboard readability: interleave queue by profile while preserving
-    # per-profile scheduled order to reflect round-robin intent.
-    by_profile: Dict[str, List[Dict[str, Any]]] = {}
-    profile_order: List[str] = []
-    for row in ordered_rows:
-        pid = str(row.get("profileId") or "")
-        if pid not in by_profile:
-            by_profile[pid] = []
-            profile_order.append(pid)
-        by_profile[pid].append(row)
-    interleaved: List[Dict[str, Any]] = []
-    while True:
-        took_any = False
-        for pid in profile_order:
-            bucket = by_profile.get(pid) or []
-            if not bucket:
-                continue
-            interleaved.append(bucket.pop(0))
-            took_any = True
-        if not took_any:
-            break
+    if len(ordered_rows) >= limit:
+        interleaved = _interleave_queue_by_profile(ordered_rows)[:limit]
+        return [QueueItemModel(**_queue_row_to_api_payload(row)) for row in interleaved]
+    preview_items = _get_queue_preview_items(limit=limit - len(ordered_rows), days=7)
+    combined = ordered_rows + preview_items
+    combined.sort(key=lambda r: (str(r.get("scheduledFor") or ""), str(r.get("id") or "")))
+    interleaved = _interleave_queue_by_profile(combined)[:limit]
     return [QueueItemModel(**_queue_row_to_api_payload(row)) for row in interleaved]
 
 
@@ -6920,15 +6917,16 @@ def clear_logs():
 
 
 @app.get("/activity", response_model=List[ActivityEntryModel])
-def read_activity(profile: Optional[str] = None):
-    # Show timeline only for currently active profiles.
+def read_activity(profile: Optional[str] = None, limit: int = 100):
+    """Return activity timeline, newest first. No stale caching."""
+    limit = max(1, min(500, int(limit or 100)))
     query = "SELECT * FROM activity_feed WHERE profile IN (SELECT name FROM profiles)"
     params: List[Any] = []
     if profile:
         query += " AND profile = ?"
         params.append(profile)
     with get_db() as db:
-        rows = db.execute(query + " ORDER BY rowid DESC", params).fetchall()
+        rows = db.execute(query + " ORDER BY timestamp DESC, rowid DESC LIMIT ?", (*params, limit)).fetchall()
     return [ActivityEntryModel(**dict(row)) for row in rows]
 
 

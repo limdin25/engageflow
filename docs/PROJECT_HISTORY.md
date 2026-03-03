@@ -43,3 +43,17 @@ Append-only log of significant changes.
 - frontend/Dockerfile — COPY frontend/package*.json, COPY frontend/., COPY frontend/nginx.conf
 
 **Evidence:** package.json has "build": "vite build"; Vite outputs to dist/ by default. nginx.conf has try_files $uri $uri/ /index.html for SPA.
+
+---
+
+## 2026-03-03 — Dashboard scheduling UI fix
+
+**Change:** Action Queue shows 30 items (was 2), profile interleaving, Activity Timeline newest-first, Next Action countdown format.
+
+**Files:**
+- backend/app.py — read_queue limit=30, merge with preview when needed, _get_queue_preview_items helper, _interleave_queue_by_profile; read_activity limit=100, ORDER BY timestamp DESC
+- frontend/src/lib/api.ts — getQueue(30), getActivity(100)
+- frontend/src/hooks/useEngageFlow.ts — useQueue/useActivity pass limits
+- frontend/src/pages/DashboardPage.tsx — formatNextActionCountdown, "No actions scheduled", display 30 items
+
+**Verification:** Dashboard shows 30 actions, interleaved profiles, latest activity first, live countdown.

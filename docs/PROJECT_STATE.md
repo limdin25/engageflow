@@ -75,6 +75,12 @@ Communities page → Join tab → 4 sub-tabs:
 
 ---
 
+## Dashboard Scheduling UI (2026-03-03)
+
+- **Action Queue:** Returns 30 upcoming actions (queue_items + preview when needed), round-robin interleaved by profile.
+- **Activity Timeline:** Newest first (ORDER BY timestamp DESC), limit 100.
+- **Next Action Countdown:** Format "Next action in 14m 22s", updates every second, "No actions scheduled" when empty.
+
 ## Next Actions
 
 1. ~~Wire Join tab with all 4 components.~~ Done.

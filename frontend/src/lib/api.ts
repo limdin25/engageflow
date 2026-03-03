@@ -307,7 +307,7 @@ export const api = {
   getAutomationSettings: () => request<AutomationSettings>("/automation/settings"),
   updateAutomationSettings: (payload: AutomationSettings) => request<AutomationSettings>("/automation/settings", { method: "PUT", body: JSON.stringify(payload) }),
 
-  getQueue: () => request<QueueItem[]>("/queue"),
+  getQueue: (limit = 30) => request<QueueItem[]>(`/queue?limit=${Math.max(1, Math.min(100, limit || 30))}`),
   getQueuePreview: (limit = 50, days = 2) => request<QueuePreviewItem[]>(`/queue/preview?limit=${limit}&days=${days}`),
   updateQueueItem: (id: string, payload: Partial<QueueItem>) => request<QueueItem>(`/queue/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   queueStartSoon: (id: string, seconds = 10) => request<QueueItem>(`/queue/${id}/start-soon?seconds=${Math.max(1, Math.floor(seconds))}`, { method: "POST" }),
@@ -315,7 +315,7 @@ export const api = {
 
   getLogs: (limit = 500) => request<LogEntry[]>(`/logs?limit=${Math.max(50, Math.min(2000, Math.floor(limit || 500)))}`),
   clearLogs: () => request<{ success: boolean; deleted: number }>("/logs", { method: "DELETE" }),
-  getActivity: () => request<ActivityEntry[]>("/activity"),
+  getActivity: (limit = 100) => request<ActivityEntry[]>(`/activity?limit=${Math.max(1, Math.min(500, limit || 100))}`),
   getAnalytics: () => request<AnalyticsData>("/analytics"),
 
   getConversations: (sync = false) => request<Conversation[]>(`/conversations${sync ? "?sync=true" : ""}`),
