@@ -32,3 +32,14 @@ Append-only log of significant changes.
 - .gitignore — *.db-wal, *.db-shm; !backend/seed/engageflow.db
 
 **Verification:** After deploy, GET /api/db-status shows DB path, size > 0, tables populated.
+
+---
+
+## 2026-03-03 — Fix Railway frontend Docker build
+
+**Change:** Frontend Dockerfile failed because Railway uses repo root as build context when Dockerfile path is frontend/Dockerfile. COPY package*.json found no file at root.
+
+**Files:**
+- frontend/Dockerfile — COPY frontend/package*.json, COPY frontend/., COPY frontend/nginx.conf
+
+**Evidence:** package.json has "build": "vite build"; Vite outputs to dist/ by default. nginx.conf has try_files $uri $uri/ /index.html for SPA.

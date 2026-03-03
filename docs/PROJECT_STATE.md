@@ -12,6 +12,11 @@
 - DB path: ENGAGEFLOW_DB_PATH (default /data/engageflow.db on Railway volume)
 - Debug: GET /api/db-status (DB path, size, table counts)
 
+**Frontend service (selfless-renewal):**
+- Dockerfile path: frontend/Dockerfile (build context = repo root)
+- Vite output: dist/ (Dockerfile copies /app/dist)
+- **Required variable:** `VITE_BACKEND_URL=https://engageflow-production.up.railway.app` (frontend calls backend directly; nginx /api proxy does not resolve on Railway)
+
 ---
 
 ## Current Objective
