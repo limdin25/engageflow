@@ -2,7 +2,7 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Railway uses repo root as build context
+# Railway uses repo root as build context (EngageFlow UI)
 COPY frontend/package*.json ./
 RUN npm ci
 
