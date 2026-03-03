@@ -1,0 +1,781 @@
+const express = require('express');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcrypt');
+const { parse } = require('csv-parse/sync');
+const db = require('./db');
+const { loginAndStoreCookies, validateCookies } = require('./skoolLogin');
+const { getGroups } = require('./skoolApi');
+const cron = require('node-cron');
+const { joinCommunity, checkCommunityMembershipStatus, fetchCommunitiesFromSkoolSettings, cancelRequestOnSkool } = require('./joinCommunity');
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+const PORT = process.env.PORT || 3100;
+
+// ==================== HELPERS ====================
+function getSetting(key) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+
+function writeLog(profileId, level, event, groupSlug, message, meta) {
+  const now = new Date().toISOString();
+  try {
+    db.prepare('INSERT INTO logs (id, profile_id, timestamp, level, event, group_slug, message, meta_json) VALUES (?,?,?,?,?,?,?,?)')
+      .run(uuidv4(), profileId, now, level || 'info', event || 'event', groupSlug || null, message || '', meta ? JSON.stringify(meta) : null);
+  } catch (err) {
+    if (/locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(err.message)) {
+      console.warn('[writeLog] Skipped due to sqlite lock:', profileId, event);
+      return;
+    }
+    throw err;
+  }
+}
+
+// Active runners map (profileId -> { running: bool })
+const activeRunners = new Map();
+let lastFetchResults = {};
+
+// ==================== PROFILES ====================
+app.get('/api/profiles', (req, res) => {
+  const rows = db.prepare(`
+    SELECT p.*, 
+      (SELECT COUNT(*) FROM join_queue WHERE profile_id = p.id) as queue_total,
+      (SELECT COUNT(*) FROM join_queue WHERE profile_id = p.id AND status = 'joined') as joined_count
+    FROM profiles p ORDER BY p.created_at DESC
+  `).all();
+
+  // Derive auth_method at runtime
+  const profiles = rows.map(p => ({
+    ...p,
+    auth_method: p.cookie_json ? (p.password_enc ? 'cookies+password' : 'cookies') : (p.password_enc ? 'password_inactive' : 'none'),
+  }));
+  res.json(profiles);
+});
+
+app.post('/api/profiles', async (req, res) => {
+  const { email, password, proxy, daily_cap, cookie_json } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  if (!password) return res.status(400).json({ error: 'Password is required' });
+
+  const id = uuidv4();
+  const password_enc = await bcrypt.hash(password, 10);
+
+  db.prepare(`INSERT INTO profiles (id, email, password_enc, password_plain, cookie_json, proxy, daily_cap, auth_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, email, password_enc, password, cookie_json || null, proxy || null, daily_cap || 50,
+    cookie_json ? 'connected' : 'disconnected'
+  );
+
+  writeLog(id, 'info', 'profile_created', null, `Profile created for ${email}`);
+
+  // Auto-connect if no cookies provided
+  if (!cookie_json) {
+    connectProfile(id, email, password, proxy).catch(console.error);
+  }
+
+  res.json({ success: true, id });
+});
+
+app.post('/api/profiles/import-csv', async (req, res) => {
+  const { csv_content } = req.body;
+  if (!csv_content) return res.status(400).json({ error: 'csv_content required' });
+
+  try {
+    const records = parse(csv_content, { columns: true, skip_empty_lines: true, trim: true });
+    const results = [];
+
+    for (const row of records) {
+      if (!row.email || !row.password) {
+        results.push({ email: row.email, success: false, error: 'email and password required' });
+        continue;
+      }
+      const id = uuidv4();
+      const password_enc = await bcrypt.hash(row.password, 10);
+      try {
+        db.prepare(`INSERT INTO profiles (id, email, password_enc, cookie_json, proxy, daily_cap)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(
+          id, row.email, password_enc, row.cookie_json || null, row.proxy || null, parseInt(row.daily_cap) || 50
+        );
+        results.push({ email: row.email, success: true, id });
+        // Queue connect with delay
+        setTimeout(() => connectProfile(id, row.email, row.password, row.proxy).catch(console.error), results.length * 5000);
+      } catch (err) {
+        results.push({ email: row.email, success: false, error: err.message });
+      }
+    }
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/profiles/:id', async (req, res) => {
+  const { status, daily_cap, proxy, cookie_json, password } = req.body;
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+
+  if (password) {
+    const enc = await bcrypt.hash(password, 10);
+    db.prepare('UPDATE profiles SET password_enc = ? WHERE id = ?').run(enc, req.params.id);
+  }
+  if (cookie_json !== undefined) {
+    db.prepare('UPDATE profiles SET cookie_json = ?, auth_status = ? WHERE id = ?')
+      .run(cookie_json, cookie_json ? 'connected' : 'disconnected', req.params.id);
+  }
+
+  db.prepare('UPDATE profiles SET status = COALESCE(?, status), daily_cap = COALESCE(?, daily_cap), proxy = COALESCE(?, proxy) WHERE id = ?')
+    .run(status, daily_cap, proxy, req.params.id);
+
+  res.json(db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id));
+});
+
+app.delete('/api/profiles/:id', (req, res) => {
+  db.prepare('DELETE FROM profiles WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+// ==================== AUTH ====================
+app.get('/api/profiles/:id/skool-auth', async (req, res) => {
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+  if (!profile.cookie_json) return res.json({ valid: false, error: 'No cookies' });
+
+  const result = await validateCookies(profile.cookie_json);
+  const now = new Date().toISOString();
+  if (result.valid) {
+    db.prepare('UPDATE profiles SET auth_status = ?, last_action_at = ?, last_action_type = ? WHERE id = ?')
+      .run('connected', now, 'test_auth', req.params.id);
+  } else {
+    db.prepare('UPDATE profiles SET auth_status = ?, auth_error = ?, last_action_at = ?, last_action_type = ? WHERE id = ?')
+      .run('expired', result.error, now, 'test_auth_failed', req.params.id);
+  }
+  writeLog(req.params.id, result.valid ? 'info' : 'error', 'test_auth', null, result.valid ? 'Auth valid' : `Auth failed: ${result.error}`);
+  res.json(result);
+});
+
+app.post('/api/profiles/:id/paste-cookies', async (req, res) => {
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+
+  const { cookies } = req.body; // raw cookie string or JSON array
+  if (!cookies) return res.status(400).json({ error: 'No cookies provided' });
+
+  let cookieJson;
+  try {
+    // Accept either JSON array or raw cookie string (from browser header)
+    if (typeof cookies === 'string' && cookies.trim().startsWith('[')) {
+      cookieJson = cookies.trim();
+      JSON.parse(cookieJson); // validate
+    } else if (Array.isArray(cookies)) {
+      cookieJson = JSON.stringify(cookies);
+    } else {
+      // Raw cookie header string: "name=val; name2=val2"
+      const pairs = cookies.split(';').map(p => p.trim()).filter(Boolean);
+      const cookieArr = pairs.map(p => {
+        const eq = p.indexOf('=');
+        return {
+          name: p.substring(0, eq),
+          value: p.substring(eq + 1),
+          domain: '.skool.com',
+          path: '/'
+        };
+      });
+      cookieJson = JSON.stringify(cookieArr);
+    }
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid cookie format' });
+  }
+
+  // Validate cookies against Skool API
+  const result = await validateCookies(cookieJson);
+  const now = new Date().toISOString();
+
+  if (result.valid) {
+    db.prepare('UPDATE profiles SET cookie_json = ?, auth_status = ?, auth_error = NULL, last_login_at = ?, last_action_at = ? WHERE id = ?')
+      .run(cookieJson, 'connected', now, now, req.params.id);
+    writeLog(req.params.id, 'info', 'cookie_paste', null, 'Cookie paste successful — authenticated');
+    res.json({ success: true, message: 'Cookies validated and stored' });
+  } else {
+    writeLog(req.params.id, 'error', 'cookie_paste_failed', null, `Cookie validation failed: ${result.error}`);
+    res.status(401).json({ error: `Cookie validation failed: ${result.error}` });
+  }
+});
+
+app.post('/api/profiles/:id/connect', async (req, res) => {
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+
+  db.prepare('UPDATE profiles SET auth_status = ? WHERE id = ?').run('connecting', req.params.id);
+  res.json({ success: true, message: 'Connecting...' });
+
+  // Email/password from body or from stored profile
+  const email = req.body.email || profile.email;
+  const password = req.body.password || profile.password_plain;
+  if (!password) {
+    db.prepare('UPDATE profiles SET auth_status = ?, auth_error = ? WHERE id = ?')
+      .run('error', 'No plaintext password available — re-add account or provide password', req.params.id);
+    return;
+  }
+
+  connectProfile(req.params.id, email, password, profile.proxy).catch(console.error);
+});
+
+async function connectProfile(profileId, email, password, proxy) {
+  db.prepare('UPDATE profiles SET auth_status = ? WHERE id = ?').run('connecting', profileId);
+  writeLog(profileId, 'info', 'login_attempt', null, `Login attempt for ${email}`);
+
+  const result = await loginAndStoreCookies(profileId, email, password, proxy);
+  const now = new Date().toISOString();
+
+  if (result.success) {
+    db.prepare('UPDATE profiles SET cookie_json = ?, auth_status = ?, auth_error = NULL, last_login_at = ?, last_action_at = ? WHERE id = ?')
+      .run(result.cookieJson, 'connected', now, now, profileId);
+    writeLog(profileId, 'info', 'login_success', null, 'Login successful — cookies stored');
+  } else {
+    db.prepare('UPDATE profiles SET auth_status = ?, auth_error = ?, last_auth_error = ?, last_action_at = ? WHERE id = ?')
+      .run('error', result.message, result.message, now, profileId);
+    writeLog(profileId, 'error', 'login_failed', null, `Login failed: ${result.message}`);
+  }
+}
+
+// ==================== PER-ACCOUNT SETTINGS ====================
+app.patch('/api/profiles/:id/settings', (req, res) => {
+  const { join_delay_seconds, max_joins_per_run, daily_cap } = req.body;
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+
+  if (join_delay_seconds !== undefined) db.prepare('UPDATE profiles SET join_delay_seconds = ? WHERE id = ?').run(join_delay_seconds, req.params.id);
+  if (max_joins_per_run !== undefined) db.prepare('UPDATE profiles SET max_joins_per_run = ? WHERE id = ?').run(max_joins_per_run, req.params.id);
+  if (daily_cap !== undefined) db.prepare('UPDATE profiles SET daily_cap = ? WHERE id = ?').run(daily_cap, req.params.id);
+
+  res.json({ success: true });
+});
+
+// ==================== QUEUE STATS ====================
+app.get('/api/profiles/:id/queue-stats', (req, res) => {
+  const stats = db.prepare(`
+    SELECT
+      SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) as queued,
+      SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) as processing,
+      SUM(CASE WHEN status='joined' THEN 1 ELSE 0 END) as joined,
+      SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status='survey_submitted' THEN 1 ELSE 0 END) as survey_submitted,
+      SUM(CASE WHEN status='skipped_paid' THEN 1 ELSE 0 END) as skipped_paid,
+      SUM(CASE WHEN status IN ('failed','error') THEN 1 ELSE 0 END) as failed
+    FROM join_queue WHERE profile_id = ?
+  `).get(req.params.id);
+  res.json(stats || { queued:0, processing:0, joined:0, pending:0, survey_submitted:0, skipped_paid:0, failed:0 });
+});
+
+// ==================== JOIN QUEUE ====================
+app.get('/api/queue', (req, res) => {
+  const { profile_id, sort_by = 'created_at', order = 'asc' } = req.query;
+  const limit = Math.min(parseInt(req.query.limit) || 100000, 100000);
+  const dir = order === 'desc' ? 'DESC' : 'ASC';
+  let orderBy = 'COALESCE(jq.sort_order, 999999) ASC, jq.created_at ASC';
+  if (sort_by === 'status') orderBy = `CASE jq.status WHEN 'queued' THEN 0 WHEN 'processing' THEN 1 WHEN 'joined' THEN 2 WHEN 'pending' THEN 3 WHEN 'survey_submitted' THEN 4 ELSE 5 END ${dir}, jq.created_at ASC`;
+  else if (sort_by === 'account') orderBy = `p.email ${dir}, jq.created_at ASC`;
+  else if (sort_by === 'community') orderBy = `LOWER(COALESCE(jq.group_name, jq.group_slug)) ${dir}`;
+  else if (sort_by === 'error') orderBy = `COALESCE(jq.error_msg, '') ${dir}, jq.created_at ASC`;
+  else if (sort_by === 'finished_at') orderBy = `jq.finished_at ${dir}, jq.created_at ASC`;
+  else if (sort_by === 'created_at') orderBy = `jq.created_at ${dir}`;
+  const rows = db.prepare(`
+    SELECT jq.*, p.email as profile_email
+    FROM join_queue jq
+    LEFT JOIN profiles p ON jq.profile_id = p.id
+    ${profile_id && profile_id !== 'all' ? 'WHERE jq.profile_id = ?' : ''}
+    ORDER BY ${orderBy}
+    LIMIT ${limit}
+  `).all(...(profile_id && profile_id !== 'all' ? [profile_id] : []));
+  res.json(rows);
+});
+
+app.post('/api/queue', (req, res) => {
+  const { profile_id, group_slug, group_name, group_id, group_members, keyword } = req.body;
+  if (!profile_id || !group_slug) return res.status(400).json({ error: 'profile_id and group_slug required' });
+
+  const id = uuidv4();
+  const nextOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM join_queue WHERE profile_id = ?').get(profile_id).n;
+  try {
+    db.prepare(`INSERT INTO join_queue (id, profile_id, group_slug, group_name, group_id, group_members, keyword, sort_order)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, profile_id, group_slug, group_name || group_slug, group_id || null, group_members || 0, keyword || null, nextOrder);
+    res.json({ success: true, id });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(409).json({ error: 'Already in queue' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/queue/add-to-account', (req, res) => {
+  const { target_profile_id, ids } = req.body;
+  if (!target_profile_id || !Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'target_profile_id and ids required' });
+  let added = 0, skipped = 0;
+  const nextOrderStmt = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS n FROM join_queue WHERE profile_id = ?');
+  let nextOrder = (nextOrderStmt.get(target_profile_id) || {}).n || 0;
+  const insertStmt = db.prepare('INSERT INTO join_queue (id, profile_id, group_slug, group_name, group_members, status, sort_order) VALUES (?,?,?,?,?,?,?)');
+  for (const queueId of ids) {
+    const row = db.prepare('SELECT * FROM join_queue WHERE id = ?').get(queueId);
+    if (!row) { skipped++; continue; }
+    nextOrder++;
+    try {
+      insertStmt.run(uuidv4(), target_profile_id, row.group_slug, row.group_name || row.group_slug, row.group_members || 0, 'queued', nextOrder);
+      added++;
+    } catch (err) {
+      if (err.message.includes('UNIQUE')) skipped++;
+      else throw err;
+    }
+  }
+  writeLog(target_profile_id, 'info', 'add_to_account', null, `Added ${added} communities${skipped ? `, ${skipped} already in queue` : ''}`);
+  res.json({ success: true, added, skipped });
+});
+
+app.post('/api/queue/delete', (req, res) => {
+  const { ids, all: deleteAll, profile_id } = req.body;
+  let deleted = 0;
+  if (deleteAll) {
+    const where = profile_id && profile_id !== 'all' ? 'WHERE profile_id = ?' : '';
+    const result = db.prepare(`DELETE FROM join_queue ${where}`).run(...(profile_id && profile_id !== 'all' ? [profile_id] : []));
+    deleted = result.changes;
+  } else if (Array.isArray(ids) && ids.length > 0) {
+    const stmt = db.prepare('DELETE FROM join_queue WHERE id = ?');
+    for (const id of ids) {
+      const r = stmt.run(id);
+      if (r.changes > 0) deleted++;
+    }
+  } else {
+    return res.status(400).json({ error: 'ids array or all: true required' });
+  }
+  res.json({ success: true, deleted });
+});
+
+// ==================== QUEUE CSV IMPORT ====================
+app.post('/api/queue/import-csv', (req, res) => {
+  const { profile_id, csv_content } = req.body;
+  if (!profile_id || !csv_content) return res.status(400).json({ error: 'profile_id and csv_content required' });
+
+  try {
+    const records = parse(csv_content, { columns: true, skip_empty_lines: true, trim: true, relax_column_count: true, relax_quotes: true });
+    const col = (r, ...keys) => { for (const k of keys) { const v = r[k]; if (v !== undefined && v !== '') return String(v).trim(); } const lk = Object.keys(r).find(k => keys.some(x => x.toLowerCase() === k.toLowerCase())); return lk ? String(r[lk] || '').trim() : ''; };
+    const results = [];
+    let nextOrder = (db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS n FROM join_queue WHERE profile_id = ?').get(profile_id) || {}).n || 0;
+    for (const row of records) {
+      const url = col(row, 'URL', 'url');
+      const name = col(row, 'Name', 'name');
+      const members = col(row, 'Members', 'members');
+      const pricing = col(row, 'Pricing', 'pricing');
+      const priceStr = col(row, 'Price', 'price');
+      // Extract slug from URL like https://www.skool.com/ai-automation-society
+      let slug = '';
+      if (url) { const match = url.match(/skool\.com\/([^\/\?#]+)/); if (match) slug = match[1]; }
+      if (!slug && name) slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      if (!slug) { results.push({ name, success: false, error: 'No URL or Name' }); continue; }
+
+      // Skip paid communities (Pricing=Paid or Price has numeric value > 0)
+      if (pricing && pricing.toLowerCase() === 'paid') {
+        results.push({ name, slug, success: false, error: 'Paid community — skipped' });
+        continue;
+      }
+      const priceNum = parseFloat(String(priceStr || '').replace(/[^0-9.]/g, ''));
+      if (!isNaN(priceNum) && priceNum > 0) {
+        results.push({ name, slug, success: false, error: 'Paid community — skipped' });
+        continue;
+      }
+
+      const id = uuidv4();
+      nextOrder++;
+      try {
+        db.prepare(`INSERT INTO join_queue (id, profile_id, group_slug, group_name, group_members, status, sort_order)
+          VALUES (?,?,?,?,?,?,?)`).run(id, profile_id, slug, name || slug, parseInt(members) || 0, 'queued', nextOrder);
+        results.push({ name, slug, success: true });
+      } catch (err) {
+        if (err.message.includes('UNIQUE')) results.push({ name, slug, success: false, error: 'Already in queue' });
+        else results.push({ name, slug, success: false, error: err.message });
+      }
+    }
+    const added = results.filter(r => r.success).length;
+    const skipped = results.filter(r => !r.success).length;
+    writeLog(profile_id, 'info', 'csv_import', null, `CSV import: ${added} added, ${skipped} skipped`);
+    res.json({ success: true, added, skipped, results });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ==================== PER-ACCOUNT RUNNER ====================
+app.post('/api/profiles/:id/run', async (req, res) => {
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Not found' });
+  if (!profile.cookie_json && profile.auth_status !== 'connected') {
+    // Try auto-connect first
+    writeLog(req.params.id, 'info', 'auto_connect', null, 'No cookies — attempting auto-connect before run');
+  }
+  if (profile.is_running) return res.json({ success: true, message: 'Already running' });
+
+  db.prepare('UPDATE profiles SET is_running = 1, status = ? WHERE id = ?').run('running', req.params.id);
+  activeRunners.set(req.params.id, { running: true });
+  res.json({ success: true, message: 'Runner started' });
+
+  // Run async
+  runProfileWorker(req.params.id).catch(err => {
+    console.error(`Runner error for ${req.params.id}:`, err);
+    db.prepare('UPDATE profiles SET is_running = 0, status = ? WHERE id = ?').run('error', req.params.id);
+  });
+});
+
+app.post('/api/profiles/:id/stop', (req, res) => {
+  db.prepare('UPDATE profiles SET is_running = 0, status = ? WHERE id = ?').run('paused', req.params.id);
+  const runner = activeRunners.get(req.params.id);
+  if (runner) runner.running = false;
+  writeLog(req.params.id, 'info', 'runner_stopped', null, 'Runner stopped by user');
+  res.json({ success: true, message: 'Runner stopped' });
+});
+
+async function runProfileWorker(profileId) {
+  let profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
+  if (!profile) return;
+
+  // Auto-connect if needed
+  if (!profile.cookie_json) {
+    writeLog(profileId, 'info', 'auto_connect_start', null, 'Auto-connecting before run...');
+    if (profile.password_enc && profile.email) {
+      // We need raw password — can't decrypt bcrypt. Block run.
+      writeLog(profileId, 'error', 'run_blocked', null, 'Cannot auto-connect: cookies missing and password is hashed. Use Connect button or paste cookies.');
+      db.prepare('UPDATE profiles SET is_running = 0, status = ?, auth_error = ? WHERE id = ?')
+        .run('paused', 'Missing cookies — connect first', profileId);
+      activeRunners.delete(profileId);
+      return;
+    }
+  }
+
+  const delaySeconds = profile.join_delay_seconds || 30;
+  const maxJoins = profile.max_joins_per_run || 10;
+  const runner = activeRunners.get(profileId) || { running: true };
+  activeRunners.set(profileId, runner);
+
+  const queued = db.prepare(`SELECT * FROM join_queue WHERE profile_id = ? AND status = 'queued' ORDER BY COALESCE(sort_order, 999999) ASC, created_at ASC LIMIT ?`)
+    .all(profileId, maxJoins);
+
+  if (queued.length === 0) {
+    writeLog(profileId, 'info', 'runner_done', null, 'No queued communities to join');
+    db.prepare('UPDATE profiles SET is_running = 0, next_action_at = NULL, status = ? WHERE id = ?').run('paused', profileId);
+    activeRunners.delete(profileId);
+    return;
+  }
+
+  // Get discovery info for survey filling
+  const discoveryInfo = db.prepare('SELECT * FROM profile_discovery_info WHERE profile_id = ?').get(profileId) || {};
+
+  for (let i = 0; i < queued.length; i++) {
+    const item = queued[i];
+
+    // Check stop flag
+    if (!runner.running) {
+      writeLog(profileId, 'info', 'runner_stopped_mid', item.group_slug, 'Runner stopped mid-run');
+      break;
+    }
+
+    const now = new Date().toISOString();
+
+    // Mark processing
+    db.prepare('UPDATE join_queue SET status = ?, started_at = ? WHERE id = ?').run('processing', now, item.id);
+    db.prepare('UPDATE profiles SET last_action_at = ?, last_action_type = ? WHERE id = ?').run(now, 'join_start', profileId);
+    writeLog(profileId, 'info', 'join_start', item.group_slug, `Joining ${item.group_name || item.group_slug}...`);
+
+    try {
+      // Refresh profile for latest cookies
+      profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
+      const result = await joinCommunity(profileId, item.group_slug, discoveryInfo);
+      const finishedAt = new Date().toISOString();
+
+      const finalStatus = result.status || (result.success ? 'joined' : 'failed');
+      db.prepare('UPDATE join_queue SET status = ?, finished_at = ?, joined_at = ?, error_msg = ? WHERE id = ?')
+        .run(finalStatus, finishedAt, (finalStatus === 'joined') ? finishedAt : null, result.message || null, item.id);
+
+      writeLog(profileId, result.success ? 'info' : 'error', 'join_result', item.group_slug,
+        `${item.group_name || item.group_slug}: ${finalStatus} — ${result.message}`);
+
+      db.prepare('UPDATE profiles SET last_action_at = ?, last_action_type = ? WHERE id = ?')
+        .run(finishedAt, `join_${finalStatus}`, profileId);
+
+    } catch (err) {
+      const finishedAt = new Date().toISOString();
+      db.prepare('UPDATE join_queue SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?')
+        .run('failed', finishedAt, err.message, item.id);
+      writeLog(profileId, 'error', 'join_error', item.group_slug, `Error: ${err.message}`);
+    }
+
+    // Compute next_action_at and sleep
+    if (i < queued.length - 1 && runner.running) {
+      const jitter = Math.floor(Math.random() * 10);
+      const waitMs = (delaySeconds + jitter) * 1000;
+      const nextAt = new Date(Date.now() + waitMs).toISOString();
+      db.prepare('UPDATE profiles SET next_action_at = ? WHERE id = ?').run(nextAt, profileId);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+
+  // Done
+  db.prepare('UPDATE profiles SET is_running = 0, next_action_at = NULL, status = ? WHERE id = ?').run('paused', profileId);
+  activeRunners.delete(profileId);
+  writeLog(profileId, 'info', 'runner_complete', null, 'Runner finished all queued items');
+}
+
+
+let fetchProfileProgress = { running: false, profileId: null, status: '', current: 0, total: 0, community: '', resolved: 0, joinedCount: 0, pendingCount: 0 };
+
+async function fetchCommunitiesForProfile(profileId) {
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
+  if (!profile || !profile.cookie_json) return { error: 'No cookie', added: 0, resolved: 0 };
+  if (fetchProfileProgress.running) return { error: 'Fetch already in progress', resolved: 0 };
+  fetchProfileProgress = { running: true, profileId, status: 'Starting...', current: 0, total: 0, community: '', resolved: 0, joinedCount: 0, pendingCount: 0 };
+  try {
+    const r = await fetchCommunitiesFromSkoolSettings(profileId, (p) => {
+      fetchProfileProgress.status = p.status || '';
+      fetchProfileProgress.current = p.current || 0;
+      fetchProfileProgress.total = p.total || 0;
+      fetchProfileProgress.community = p.community || '';
+    }, profile.cookie_json);
+    fetchProfileProgress.running = false;
+    if (r.error) return { error: r.error, resolved: 0 };
+    const toSlug = (x) => (typeof x === 'string' ? x : (x && x.slug) || '').toLowerCase();
+    const joinedSet = new Set((r.joined || []).map(toSlug).filter(Boolean));
+    const pendingSet = new Set((r.pending || []).map(toSlug).filter(Boolean));
+    fetchProfileProgress.joinedCount = joinedSet.size;
+    fetchProfileProgress.pendingCount = pendingSet.size;
+    lastFetchResults[profileId] = { joined: r.joined || [], pending: r.pending || [], fetchedAt: new Date().toISOString() };
+    const upsertComm = db.prepare("INSERT INTO profile_communities (id, profile_id, slug, name, status, requested_at, joined_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(profile_id, slug) DO UPDATE SET name=excluded.name, status=excluded.status, requested_at=excluded.requested_at, joined_at=excluded.joined_at)");
+    const toName = (x) => (typeof x === 'string' ? x : (x && (x.name || x.slug)) || '').toString();
+    for (const c of (r.joined || [])) {
+      const slug = toSlug(c);
+      if (!slug) continue;
+      upsertComm.run(uuidv4(), profileId, slug, toName(c), 'joined', null, new Date().toISOString());
+    }
+    for (const c of (r.pending || [])) {
+      const slug = toSlug(c);
+      if (!slug) continue;
+      const reqAt = (typeof c === 'object' && c.requestedAt) ? c.requestedAt : null;
+      upsertComm.run(uuidv4(), profileId, slug, toName(c), 'pending', reqAt, null);
+    }
+    let resolved = 0;
+    const queueItems = db.prepare("SELECT id, group_slug FROM join_queue WHERE profile_id = ?").all(profileId);
+    for (const item of queueItems) {
+      const slug = (item.group_slug || '').toLowerCase();
+      if (!slug) continue;
+      if (joinedSet.has(slug)) {
+        db.prepare("UPDATE join_queue SET status = 'joined', joined_at = datetime('now'), error_msg = NULL WHERE id = ?").run(item.id);
+        writeLog(profileId, 'info', 'join_resolved', item.group_slug, item.group_slug + ': confirmed joined');
+        resolved++;
+      } else if (pendingSet.has(slug)) {
+        db.prepare("UPDATE join_queue SET status = 'pending', error_msg = NULL WHERE id = ?").run(item.id);
+      }
+    }
+    fetchProfileProgress.resolved = resolved;
+    return { resolved, joined: r.joined?.length || 0, pending: r.pending?.length || 0 };
+  } catch (e) {
+    fetchProfileProgress.running = false;
+    return { error: e.message, resolved: 0 };
+  }
+}
+
+let fetchAllProgress = { running: false, total: 0, done: 0, current: null, resolved: 0 };
+
+app.post('/api/communities/fetch/:profileId', async (req, res) => {
+  res.json({ started: true });
+  (async () => {
+    try {
+      await fetchCommunitiesForProfile(req.params.profileId);
+    } catch (e) { console.error(e); fetchProfileProgress.running = false; }
+  })();
+});
+
+app.get('/api/communities/fetch/:profileId/status', (req, res) => {
+  const { profileId } = req.params;
+  const p = fetchProfileProgress;
+  if (p.profileId !== profileId) {
+    return res.json({ running: false, status: '', current: 0, total: 0, community: '' });
+  }
+  res.json({ running: p.running, status: p.status, current: p.current, total: p.total, community: p.community, resolved: p.resolved, joinedCount: p.joinedCount, pendingCount: p.pendingCount });
+});
+
+app.get('/api/communities/fetch/:profileId/results', (req, res) => {
+  const { profileId } = req.params;
+  const mem = lastFetchResults[profileId];
+  const rows = db.prepare("SELECT slug, name, status, requested_at, joined_at FROM profile_communities WHERE profile_id = ? ORDER BY status, name").all(profileId);
+  if (rows.length > 0) {
+    const joined = rows.filter(r => r.status === 'joined').map(r => ({ slug: r.slug, name: r.name || r.slug, joinedAt: r.joined_at }));
+    const pending = rows.filter(r => r.status === 'pending').map(r => ({ slug: r.slug, name: r.name || r.slug, requestedAt: r.requested_at }));
+    const canceled = rows.filter(r => r.status === 'canceled').map(r => ({ slug: r.slug, name: r.name || r.slug, requestedAt: r.requested_at }));
+    return res.json({ joined, pending, canceled, fetchedAt: mem?.fetchedAt || new Date().toISOString() });
+  }
+  res.json(mem || null);
+});
+
+app.delete('/api/communities/remove/:profileId/:slug', (req, res) => {
+  const { profileId, slug } = req.params;
+  if (!profileId || !slug) return res.status(400).json({ error: 'profileId and slug required' });
+  try {
+    const r = db.prepare('DELETE FROM profile_communities WHERE profile_id = ? AND lower(slug) = lower(?)').run(profileId, decodeURIComponent(slug));
+    res.json({ success: true, deleted: r.changes > 0 });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/communities/cancel-request', async (req, res) => {
+  const { profileId, communitySlug } = req.body;
+  if (!profileId || !communitySlug) return res.status(400).json({ error: 'profileId and communitySlug required' });
+  try {
+    const result = await cancelRequestOnSkool(profileId, communitySlug);
+    if (result.success) {
+      try {
+        db.prepare("UPDATE profile_communities SET status = 'canceled' WHERE profile_id = ? AND lower(slug) = lower(?)").run(profileId, communitySlug);
+      } catch (e) {}
+      const data = lastFetchResults[profileId];
+      if (data && data.pending) {
+        const slugLower = communitySlug.toLowerCase();
+        const found = data.pending.find(p => ((p.slug || p).toLowerCase()) === slugLower);
+        if (found) {
+          data.pending = data.pending.filter(p => ((p.slug || p).toLowerCase()) !== slugLower);
+          (data.canceled = data.canceled || []).push({ slug: found.slug || found, name: found.name || found, requestedAt: found.requestedAt });
+        }
+      }
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ success: false, error: result.error || 'Failed to cancel' });
+    }
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/communities/fetch-all', async (req, res) => {
+  if (fetchAllProgress.running) return res.status(429).json({ error: 'Already in progress' });
+  const profiles = db.prepare('SELECT id, email FROM profiles WHERE cookie_json IS NOT NULL AND cookie_json != ""').all();
+  fetchAllProgress = { running: true, total: profiles.length, done: 0, current: null, resolved: 0 };
+  res.json({ started: true, total: profiles.length });
+  (async () => {
+    for (const p of profiles) {
+      fetchAllProgress.current = p.email;
+      const r = await fetchCommunitiesForProfile(p.id);
+      if (!r.error) fetchAllProgress.resolved += r.resolved || 0;
+      fetchAllProgress.done++;
+    }
+    fetchAllProgress.running = false;
+    fetchAllProgress.current = null;
+  })().catch(e => { fetchAllProgress.running = false; console.error(e); });
+});
+
+app.get('/api/communities/fetch-all/status', (req, res) => {
+  res.json({ ...fetchAllProgress });
+});
+
+// ==================== LOGS ====================
+app.get('/api/logs', (req, res) => {
+  const { profile_id, limit = 200, sort_by = 'timestamp', order = 'desc' } = req.query;
+  let query = `SELECT l.*, p.email as profile_email FROM logs l LEFT JOIN profiles p ON l.profile_id = p.id WHERE 1=1`;
+  const params = [];
+  if (profile_id && profile_id !== 'all') { query += ' AND l.profile_id = ?'; params.push(profile_id); }
+  const dir = order === 'asc' ? 'ASC' : 'DESC';
+  let orderBy = 'l.timestamp DESC';
+  if (sort_by === 'event') orderBy = `l.event ${dir}, l.timestamp DESC`;
+  else if (sort_by === 'community') orderBy = `l.group_slug ${dir}, l.timestamp DESC`;
+  else if (sort_by === 'message') orderBy = `l.message ${dir}, l.timestamp DESC`;
+  else if (sort_by === 'timestamp') orderBy = `l.timestamp ${dir}`;
+  else if (sort_by === 'account') orderBy = `p.email ${dir}, l.timestamp DESC`;
+  query += ` ORDER BY ${orderBy} LIMIT ${parseInt(limit)}`;
+  res.json(db.prepare(query).all(...params));
+});
+
+app.get('/api/logs/export', (req, res) => {
+  const { status = 'failed', format = 'csv' } = req.query;
+  const rows = db.prepare(`
+    SELECT p.email as profile_email, jq.group_slug,
+      'https://www.skool.com/' || jq.group_slug as skool_url,
+      jq.error_msg as message, COALESCE(jq.finished_at, jq.created_at) as timestamp
+    FROM join_queue jq
+    LEFT JOIN profiles p ON jq.profile_id = p.id
+    WHERE jq.status = ?
+    ORDER BY COALESCE(jq.finished_at, jq.created_at) DESC
+  `).all(status);
+  if (format === 'csv') {
+    const header = ['profile_email', 'group_slug', 'skool_url', 'message', 'timestamp'];
+    const esc = (v) => '"' + String(v || '').replace(/"/g, '""') + '"';
+    const csv = [header.join(','), ...rows.map(r => header.map(h => esc(r[h])).join(','))].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="failed-' + Date.now() + '.csv"');
+    return res.send(csv);
+  }
+  res.json(rows);
+});
+
+// ==================== SETTINGS ====================
+app.get('/api/settings', (req, res) => {
+  const rows = db.prepare('SELECT * FROM settings').all();
+  const settings = {};
+  rows.forEach(r => settings[r.key] = r.value);
+  res.json(settings);
+});
+
+app.post('/api/settings', (req, res) => {
+  for (const [key, value] of Object.entries(req.body)) {
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+  }
+  res.json({ success: true });
+});
+
+// ==================== DISCOVERY INFO ====================
+const EUROPEAN_SURNAMES = ['Müller', 'Schmidt', 'Fischer', 'Weber', 'Meyer', 'Wagner', 'Becker', 'Schulz', 'Hoffmann', 'Koch', 'Schneider', 'Fuchs', 'Berger', 'Schmitt', 'Lange', 'Walter', 'Klein', 'Wolf', 'König', 'Neumann'];
+const SURVEY_DOMAINS = ['AgentStack.io', 'FlowKernel.com', 'CodeAscent.io', 'BuildCatalyst.com', 'StackThrive.com', 'DevClarity.io', 'LaunchRelay.com', 'SystemSprint.com', 'CloudThesis.com', 'AIConstructor.io', 'BuilderScale.com', 'DataForgeLabs.com', 'LoopSignal.com', 'StackOperator.com', 'TechBlueprint.io', 'DevLeverage.com', 'ProductNexus.io', 'CodeVelocity.io', 'GrowthKernel.com', 'BuildAuthority.com', 'StackPilot.io', 'AIWorkflowLab.com', 'SystemVector.io', 'LaunchMechanic.com', 'DevMatrix.io', 'TechOperator.com', 'BuilderEngine.io', 'CodeCommand.io', 'ScaleCircuit.com', 'InfraSprint.io'];
+const SURVEY_PHONES_UK = ['+44 7700 900214', '+44 7520 123456', '+44 7624 456789', '+44 7900 123321', '+44 7911 234567', '+44 7922 345678', '+44 7933 456123', '+44 7944 567234', '+44 7955 678345', '+44 7966 789456', '+44 7977 890567', '+44 7988 901678', '+44 7999 112233', '+44 7500 334455', '+44 7611 556677'];
+const SURVEY_PHONES_US = ['+1 212 555 0107', '+1 213 555 0142', '+1 305 555 0176', '+1 312 555 0199', '+1 415 555 0124', '+1 516 555 0163', '+1 617 555 0188', '+1 646 555 0115', '+1 702 555 0137', '+1 713 555 0159', '+1 818 555 0103', '+1 202 555 0144', '+1 303 555 0171', '+1 404 555 0182', '+1 503 555 0129'];
+const BIOS = ['Interested in growing and learning. Looking forward to connecting.', 'Always learning, always growing. Excited to be here.', 'Curious about new ideas and connecting with like-minded people.', 'Here to learn, share, and grow together.', 'Growing my skills and building connections.', 'Interested in the community. Looking forward to contributing.', 'Learning and growing. Happy to be part of this.', 'Passionate about growth and making connections.'];
+function getDiscoveryDefaults(profile) {
+  if (!profile) return {};
+  const username = (profile.email || '').split('@')[0] || 'user';
+  const namePart = username.replace(/[._]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim() || 'User';
+  const surname = EUROPEAN_SURNAMES[Math.floor(Math.random() * EUROPEAN_SURNAMES.length)];
+  const words = ['growth', 'marketing', 'digital', 'creative', 'startup', 'innovate', 'build', 'scale', 'launch'];
+  const randWords = () => [words[Math.floor(Math.random() * words.length)], words[Math.floor(Math.random() * words.length)]].join('-');
+  const randLetters = () => 'abcdefghijklmnopqrstuvwxyz'.split('').sort(() => Math.random() - 0.5).slice(0, 2 + Math.floor(Math.random() * 2)).join('');
+  const instaBase = username.replace(/[^a-z0-9]/gi, '');
+  const instaExtras = ['42', '99', '7k', 'xy', '23', '01', 'ab', '88', '12', 'xyz'];
+  const phone = Math.random() < 0.5 ? SURVEY_PHONES_UK[Math.floor(Math.random() * SURVEY_PHONES_UK.length)] : SURVEY_PHONES_US[Math.floor(Math.random() * SURVEY_PHONES_US.length)];
+  return {
+    email: profile.email || '',
+    full_name: `${namePart} ${surname}`,
+    phone,
+    instagram: `instagram.com/${instaBase}${instaExtras[Math.floor(Math.random() * instaExtras.length)]}`,
+    linkedin: `linkedin.com/in/${username.replace(/[^a-z0-9]/gi, '-')}-${randLetters()}`,
+    website: 'https://' + SURVEY_DOMAINS[Math.floor(Math.random() * SURVEY_DOMAINS.length)],
+    bio: BIOS[Math.floor(Math.random() * BIOS.length)]
+  };
+}
+app.get('/api/profiles/:id/discovery-info', (req, res) => {
+  const info = db.prepare('SELECT * FROM profile_discovery_info WHERE profile_id = ?').get(req.params.id);
+  if (info && (info.full_name || info.email || info.phone || info.instagram || info.linkedin || info.website || info.bio)) {
+    return res.json({ full_name: info.full_name, email: info.email, phone: info.phone, instagram: info.instagram, linkedin: info.linkedin, website: info.website, bio: info.bio });
+  }
+  const profile = db.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
+  const defaults = getDiscoveryDefaults(profile);
+  res.json(info ? { ...defaults, ...info } : defaults);
+});
+
+app.put('/api/profiles/:id/discovery-info', (req, res) => {
+  const { full_name, email, phone, instagram, linkedin, website, bio } = req.body;
+  db.prepare(`INSERT OR REPLACE INTO profile_discovery_info (profile_id, full_name, email, phone, instagram, linkedin, website, bio, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,datetime('now'))`).run(req.params.id, full_name || '', email || '', phone || '', instagram || '', linkedin || '', website || '', bio || '');
+  res.json({ success: true });
+});
+
+// ==================== START ====================
+cron.schedule('0 8,20 * * *', async () => {
+  const profiles = db.prepare('SELECT id FROM profiles WHERE cookie_json IS NOT NULL AND cookie_json != ""').all();
+  for (const p of profiles) { try { await fetchCommunitiesForProfile(p.id); } catch (e) { console.error(e.message); } }
+});
+
+app.listen(PORT, () => {
+  console.log(`Community Join Manager backend running on port ${PORT}`);
+});

@@ -25,7 +25,10 @@ dist-ssr/
 backend/__pycache__/
 backend/*.py[cod]
 backend/*.db
+backend/*.db-wal
+backend/*.db-shm
 backend/*.sqlite
+!backend/seed/engageflow.db
 backend/skool_accounts/
 backend/skool_daily_counters_state.json
 backend/skool_global_blacklist.json

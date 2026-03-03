@@ -62,7 +62,7 @@ except Exception:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_AVAILABLE = False
 
-DB_PATH = Path(__file__).parent / "engageflow.db"
+DB_PATH = Path(os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db")))
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
@@ -5914,6 +5914,30 @@ async def health_check(request: Request):
             {"status": "error", "reason": str(exc)},
             status_code=500,
         )
+
+
+@app.get("/api/db-status")
+def db_status():
+    """Debug endpoint: DB path, file size, table counts. Remove after validation."""
+    try:
+        path = DB_PATH
+        size = path.stat().st_size if path.exists() else 0
+        tables = {}
+        if path.exists() and size > 0:
+            with sqlite3.connect(path, timeout=5.0) as conn:
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                ).fetchall():
+                    name = row[0]
+                    cnt = conn.execute(f"SELECT COUNT(*) FROM [{name}]").fetchone()[0]
+                    tables[name] = cnt
+        return JSONResponse({
+            "db_path": str(path),
+            "file_size_bytes": size,
+            "tables": tables,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/profiles", response_model=List[ProfileModel])

@@ -1,0 +1,113 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+
+const db = new Database(path.join(__dirname, 'community-join-manager.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+// ==================== MIGRATIONS ====================
+db.exec(`
+  CREATE TABLE IF NOT EXISTS profiles (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    password_enc TEXT,
+    password_plain TEXT,
+    cookie_json TEXT,
+    proxy TEXT,
+    status TEXT DEFAULT 'paused',
+    auth_status TEXT DEFAULT 'disconnected',
+    auth_error TEXT,
+    daily_count INTEGER DEFAULT 0,
+    daily_cap INTEGER DEFAULT 50,
+    is_running INTEGER DEFAULT 0,
+    join_delay_seconds INTEGER DEFAULT 30,
+    max_joins_per_run INTEGER DEFAULT 10,
+    next_action_at TEXT,
+    last_action_at TEXT,
+    last_action_type TEXT,
+    last_login_at TEXT,
+    last_auth_error TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS join_queue (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    group_slug TEXT NOT NULL,
+    group_id TEXT,
+    group_name TEXT,
+    group_members INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'queued',
+    keyword TEXT,
+    questions_json TEXT,
+    error_msg TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    joined_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(profile_id, group_slug)
+  );
+
+  CREATE TABLE IF NOT EXISTS profile_discovery_info (
+    profile_id TEXT PRIMARY KEY,
+    full_name TEXT,
+    email TEXT,
+    phone TEXT,
+    instagram TEXT,
+    linkedin TEXT,
+    website TEXT,
+    bio TEXT,
+    preferred_option TEXT,
+    ai_generated INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS logs (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    level TEXT DEFAULT 'info',
+    event TEXT,
+    group_slug TEXT,
+    message TEXT,
+    meta_json TEXT,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS profile_communities (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    name TEXT,
+    status TEXT NOT NULL DEFAULT 'joined',
+    requested_at TEXT,
+    joined_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(profile_id, slug)
+  );
+
+  CREATE TABLE IF NOT EXISTS community_pool (
+    id TEXT PRIMARY KEY,
+    group_slug TEXT NOT NULL,
+    group_name TEXT,
+    group_members INTEGER DEFAULT 0,
+    source_url TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// Migration: add sort_order to join_queue
+try {
+  db.exec(`ALTER TABLE join_queue ADD COLUMN sort_order INTEGER DEFAULT 0`);
+} catch (e) {
+  if (!/duplicate column/i.test(e.message)) throw e;
+}
+
+module.exports = db;
