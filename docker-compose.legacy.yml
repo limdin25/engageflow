@@ -6,9 +6,11 @@ services:
     container_name: engageflow-legacy-backend
     expose:
       - "8000"
+    volumes:
+      - /root/engageflow-shared:/app/shared_db
     environment:
       - TZ=Europe/London
-      - ENGAGEFLOW_DB_PATH=/app/engageflow-legacy.db
+      - ENGAGEFLOW_DB_PATH=/app/shared_db/engageflow.db
     restart: unless-stopped
 
   frontend:
