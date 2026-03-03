@@ -74,6 +74,7 @@ Files:
 - .gitignore (added backend/.env)
 - All backend, frontend, docs, scripts
 
+<<<<<<< HEAD
 Tests: None
 Verification: Repo accessible, main branch pushed
 Reversal: `git remote remove origin`
@@ -181,3 +182,12 @@ Verification: GET /queue returns ≤30, GET /activity returns ≤100, activity t
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #7 — Governance correction: cherry-pick ab6c7e6 to dev + TDD tests
+
+Date: 2026-03-03
+Change: Fix was pushed to main; governance requires dev-first. Cherry-picked ab6c7e6 onto dev, resolved conflicts, added backend TDD tests for queue limit, interleaving, activity newest-first.
+Files: backend/app.py, frontend (api, DashboardPage), backend/tests/test_dashboard_queue_timeline.py
+Verification: pytest backend/tests/test_dashboard_queue_timeline.py -v; DEV VPS deploy

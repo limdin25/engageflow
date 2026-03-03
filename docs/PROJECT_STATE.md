@@ -64,6 +64,12 @@ The system is considered healthy when:
 2. Browser/session state can become stale; profiles require periodic re-auth.
 3. SQLite lock under concurrent writes; backend has retry logic and log buffer.
 
+## Dashboard Scheduling UI (2026-03-03)
+
+- **Action Queue:** Returns 30 upcoming actions, round-robin interleaved by profile.
+- **Activity Timeline:** Newest first (ORDER BY timestamp DESC), limit 100.
+- **Next Action Countdown:** Format "Next action in 14m 22s", updates every second, "No actions scheduled" when empty.
+
 ## Recent Fixes (2026-03-03)
 
 1. Profile rotation: profile_last_attempt updated at top of sync loop (no stuck single account).

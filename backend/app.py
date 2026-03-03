@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -6429,7 +6428,7 @@ def read_activity(profile: Optional[str] = None, limit: int = 100):
     safe_limit = max(10, min(500, int(limit or 100)))
     with get_db() as db:
         rows = db.execute(
-            query + " ORDER BY rowid DESC LIMIT ?",
+            query + " ORDER BY timestamp DESC, rowid DESC LIMIT ?",
             (*params, safe_limit),
         ).fetchall()
     result = []
