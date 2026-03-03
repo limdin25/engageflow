@@ -257,3 +257,21 @@ Verification: https://selfless-renewal-dev.up.railway.app — Activity Timeline 
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #12 — Activity Timeline "19 hr ago" root cause + timestamp normalization
+
+Date: 2026-03-04
+Change: Root cause: DB mismatch — Railway DEV backend reads Railway DB; automation not running there (or runs on VPS with different DB). Fix: configure Railway DEV to run automation (ENGAGEFLOW_AUTOMATION_ENABLED=1, ENGAGEFLOW_DB_PATH, OpenAI key). Defensive: backend _normalize_activity_timestamp now appends Z to ISO timestamps without timezone for frontend parseISO.
+Files:
+- backend/app.py (_normalize_activity_timestamp)
+- backend/tests/test_activity_timestamp.py (test_activity_timestamp_normalized_with_z_suffix)
+- docs/PROJECT_STATE.md
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v (18 passed)
+Verification: curl https://engageflow-dev.up.railway.app/activity?limit=1 — timestamps end with Z
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

@@ -6444,7 +6444,7 @@ def clear_logs():
 
 
 def _normalize_activity_timestamp(ts: str) -> str:
-    """Normalize UTC timestamps: +00:00 -> Z for consistent API output."""
+    """Normalize UTC timestamps for consistent API output: ensure Z suffix for unambiguous parsing."""
     if not ts:
         return ts
     s = str(ts).strip()
@@ -6452,6 +6452,11 @@ def _normalize_activity_timestamp(ts: str) -> str:
         return s[:-6] + "Z"
     if s.endswith("+0000"):
         return s[:-5] + "Z"
+    if s.endswith("Z") or (len(s) >= 6 and s[-6] in "+-" and s[-3] == ":"):
+        return s
+    # ISO-like datetime without timezone: treat as UTC, append Z for frontend parseISO
+    if s and len(s) >= 19 and s[4] == "-" and s[10] in "T " and s[13] == ":":
+        return s.rstrip() + "Z"
     return s
 
 

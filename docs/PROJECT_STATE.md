@@ -128,6 +128,13 @@ The system is considered healthy when:
 - **DB path:** `ENGAGEFLOW_DB_PATH=/data/engageflow.db` (Railway volume). If not set, backend uses repo default.
 - **TDD:** backend/tests/test_health_automation.py — test_health_running_false_when_disabled, test_health_running_true_when_scheduler_started, test_activity_updates_when_action_executes.
 
+## Activity Timeline "19 hr ago" Root Cause (2026-03-04)
+
+- **Symptom:** UI shows "19 hr ago" even when automation comments now.
+- **Root cause:** DB/environment mismatch. Railway DEV backend reads from `/data/engageflow.db`; automation was NOT running on Railway (health.running=false). If automation runs on VPS, it writes to `/root/engageflow-shared/engageflow.db` — different DB.
+- **Fix:** Run automation on Railway DEV: set `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`, and OpenAI API key in Railway Variables. Then activity_feed writes go to same DB the API reads.
+- **Defensive:** Backend now normalizes activity timestamps (append Z when no timezone) so frontend parseISO works correctly. backend/tests/test_activity_timestamp.py.
+
 ## Next Actions (max 10)
 
 1. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
