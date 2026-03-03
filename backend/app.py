@@ -498,7 +498,6 @@ def _insert_backend_log(
         _db_commit_with_retry(db)
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower():
-            LOGGER.warning("Skipped log write due to sqlite lock: profile=%s status=%s", profile, status)
             with _LOG_BUFFER_LOCK:
                 _LOG_BUFFER.append({
                     "profile": profile,
@@ -506,7 +505,12 @@ def _insert_backend_log(
                     "module": module_value,
                     "action": action_value,
                     "message": normalized_message,
+                    "ts": now_display_time(),
                 })
+            LOGGER.warning(
+                "Buffered log write due to sqlite lock: profile=%s status=%s (buffer_size=%d)",
+                profile, status, len(_LOG_BUFFER),
+            )
             return
         raise
 
@@ -514,15 +518,18 @@ def _insert_backend_log(
 def _flush_log_buffer(db: sqlite3.Connection) -> None:
     """Retry buffered log writes; call after sync cycle when DB lock is released."""
     with _LOG_BUFFER_LOCK:
-        to_flush = list(_LOG_BUFFER)
+        pending = list(_LOG_BUFFER)
         _LOG_BUFFER.clear()
-    for entry in to_flush:
+
+    requeue: List[Dict[str, Any]] = []
+    for entry in pending:
         try:
+            ts = entry.get("ts") or now_display_time()
             try:
                 _db_execute_with_retry(
                     db,
                     "INSERT INTO logs (id, timestamp, profile, status, module, action, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), now_display_time(), entry["profile"], entry["status"], entry["module"], entry["action"], entry["message"], None),
+                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["module"], entry["action"], entry["message"], None),
                 )
             except sqlite3.OperationalError as col_exc:
                 if "no column named module" not in str(col_exc).lower() and "no column named action" not in str(col_exc).lower():
@@ -530,12 +537,20 @@ def _flush_log_buffer(db: sqlite3.Connection) -> None:
                 _db_execute_with_retry(
                     db,
                     "INSERT INTO logs (id, timestamp, profile, status, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), now_display_time(), entry["profile"], entry["status"], entry["message"], None),
+                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["message"], None),
                 )
             _db_commit_with_retry(db)
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                requeue.append(entry)
+            else:
+                raise
         except Exception:
-            with _LOG_BUFFER_LOCK:
-                _LOG_BUFFER.append(entry)
+            requeue.append(entry)
+
+    if requeue:
+        with _LOG_BUFFER_LOCK:
+            _LOG_BUFFER[:0] = requeue
 
 
 def _emit_dm_sync_log_once(
@@ -3922,6 +3937,11 @@ def _backfill_dm_activity_from_logs(db: sqlite3.Connection, *, limit: int = 5000
     for row in reversed(rows):
         scanned += 1
         profile = str(row["profile"] or "SYSTEM").strip() or "SYSTEM"
+        _pr = db.execute(
+            "SELECT name FROM profiles WHERE name = ? OR username = ? OR email = ? LIMIT 1",
+            (profile, profile, profile),
+        ).fetchone()
+        profile = str(_pr["name"]) if _pr and _pr.get("name") else profile
         timestamp = str(row["timestamp"] or "").strip() or now_display_time()
         message = str(row["message"] or "").strip()
 
@@ -4800,7 +4820,10 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
 
         db.commit()
     finally:
-        _flush_log_buffer(db)
+        try:
+            _flush_log_buffer(db)
+        except Exception:
+            LOGGER.exception("_flush_log_buffer failed in finally block — ignoring")
         _SKOOL_CHAT_SYNC_LOCK.release()
 
 

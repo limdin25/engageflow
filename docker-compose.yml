@@ -1,5 +1,6 @@
 services:
   backend:
+    # volumes bind-mount removed for production; use docker-compose.dev.yml for dev
     # Internal API service. Not published to host to avoid direct :8000 access.
     build:
       context: ./backend
