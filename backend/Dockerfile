@@ -12,12 +12,17 @@ RUN apt-get update \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only backend dependency files first for better caching
+COPY backend/requirements.txt /app/requirements.txt
+
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Playwright deps (keep as-is since your app expects it)
 RUN python -m playwright install --with-deps chromium
 
-COPY . .
+# Copy backend code
+COPY backend/ /app/
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash", "-lc", "bash scripts/bootstrap_db.sh && uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
