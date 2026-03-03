@@ -298,7 +298,14 @@ class SkoolSessionManager:
                     self.page.wait_for_load_state("networkidle", timeout=2000)
                 except Exception:
                     pass
-                self.page.wait_for_timeout(LOGIN_CHECK_POST_LOAD_WAIT_MS)
+                try:
+                    self.page.wait_for_selector(
+                        "div[class*='TopNav'], button[class*='ChatNotificationsIconButton'], a[href^='/@']",
+                        timeout=LOGIN_CHECK_POST_LOAD_WAIT_MS,
+                        state="visible",
+                    )
+                except Exception:
+                    pass
                 navigated = True
                 break
             except Exception:
@@ -4030,12 +4037,15 @@ class AutomationEngine:
             )
             for row in activity_rows:
                 event_id = row.get("id", str(uuid.uuid4()))
-                profile_label = row.get("profileLabel", "")
                 profile_id = str(row.get("profileId") or "").strip()
+                # Use canonical profiles.name only; never profileLabel for activity_feed.profile.
+                profile_for_feed = "SYSTEM"
                 if profile_id:
                     name_row = db.execute("SELECT name FROM profiles WHERE id = ?", (profile_id,)).fetchone()
                     if name_row and name_row["name"]:
-                        profile_label = str(name_row["name"])
+                        profile_for_feed = str(name_row["name"])
+                    else:
+                        profile_for_feed = profile_id
                 db.execute(
                     """
                     INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl)
@@ -4043,7 +4053,7 @@ class AutomationEngine:
                     """,
                     (
                         event_id,
-                        profile_label or row.get("profileLabel", ""),
+                        profile_for_feed,
                         row.get("community", ""),
                         row.get("result", "Commented"),
                         row.get("timestamp", datetime.now().isoformat()),

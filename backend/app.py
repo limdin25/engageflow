@@ -1,4 +1,4 @@
-﻿
+
 from __future__ import annotations
 
 import asyncio
@@ -97,6 +97,8 @@ _SKOOL_CHAT_IMPORT_CACHE: Dict[str, Any] = {
     "dm_log_last": {},
 }
 _SKOOL_CHAT_SYNC_LOCK = threading.Lock()
+_LOG_BUFFER: List[Dict[str, Any]] = []
+_LOG_BUFFER_LOCK = threading.Lock()
 _PLAYWRIGHT_SYNC_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE: Dict[str, float] = {}
@@ -497,8 +499,43 @@ def _insert_backend_log(
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower():
             LOGGER.warning("Skipped log write due to sqlite lock: profile=%s status=%s", profile, status)
+            with _LOG_BUFFER_LOCK:
+                _LOG_BUFFER.append({
+                    "profile": profile,
+                    "status": status,
+                    "module": module_value,
+                    "action": action_value,
+                    "message": normalized_message,
+                })
             return
         raise
+
+
+def _flush_log_buffer(db: sqlite3.Connection) -> None:
+    """Retry buffered log writes; call after sync cycle when DB lock is released."""
+    with _LOG_BUFFER_LOCK:
+        to_flush = list(_LOG_BUFFER)
+        _LOG_BUFFER.clear()
+    for entry in to_flush:
+        try:
+            try:
+                _db_execute_with_retry(
+                    db,
+                    "INSERT INTO logs (id, timestamp, profile, status, module, action, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), now_display_time(), entry["profile"], entry["status"], entry["module"], entry["action"], entry["message"], None),
+                )
+            except sqlite3.OperationalError as col_exc:
+                if "no column named module" not in str(col_exc).lower() and "no column named action" not in str(col_exc).lower():
+                    raise
+                _db_execute_with_retry(
+                    db,
+                    "INSERT INTO logs (id, timestamp, profile, status, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), now_display_time(), entry["profile"], entry["status"], entry["message"], None),
+                )
+            _db_commit_with_retry(db)
+        except Exception:
+            with _LOG_BUFFER_LOCK:
+                _LOG_BUFFER.append(entry)
 
 
 def _emit_dm_sync_log_once(
@@ -1617,7 +1654,14 @@ def _goto_skool_entry_page(page: Any, timeout_ms: int) -> tuple[bool, str]:
                 page.wait_for_load_state("networkidle", timeout=9000)
             except Exception:
                 pass
-            page.wait_for_timeout(1800)
+            try:
+                page.wait_for_selector(
+                    "div[class*='TopNav'], button[class*='ChatNotificationsIconButton'], a[href^='/@']",
+                    timeout=1800,
+                    state="visible",
+                )
+            except Exception:
+                pass
             return True, url
         except Exception as exc:
             last_error = str(exc or "")
@@ -4557,6 +4601,8 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
             for idx, profile_row in enumerate(selected_profiles):
                 profile_id = str(profile_row["id"])
                 profile_name = str(profile_row["name"])
+                # Update profile_last_attempt immediately so rotation advances even on error.
+                profile_last_attempt[profile_id] = now_ts
                 cached_cards_by_chat: Dict[str, Dict[str, Any]] = {}
                 for cached_card in previous_live_cards:
                     if str(cached_card.get("profile_id") or "").strip() != profile_id:
@@ -4565,7 +4611,6 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
                     if not cached_chat_id:
                         continue
                     cached_cards_by_chat[cached_chat_id] = cached_card
-                profile_last_attempt[profile_id] = now_ts
                 profile_started_at = time.monotonic()
                 profile_cards: List[Dict[str, Any]] = []
                 sync_error: Optional[str] = None
@@ -4755,6 +4800,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
 
         db.commit()
     finally:
+        _flush_log_buffer(db)
         _SKOOL_CHAT_SYNC_LOCK.release()
 
 
@@ -6548,11 +6594,13 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
             )
             try:
+                # Use canonical profiles.name for activity_feed.profile.
+                act_profile = str(profile_row["name"] or row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        str(row["profileName"] or "SYSTEM"),
+                        act_profile,
                         str(row["originGroup"] or "Skool Inbox"),
                         f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
                         now_display_time(),
@@ -6577,11 +6625,15 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 comment_attr = parse_json_field(raw_comment_attr, {})
                 post_url = str(comment_attr.get("postUrl") or "").strip() or "https://www.skool.com/"
                 contact_name = str(row["contactName"] or "").strip() or "contact"
+                # Use canonical profiles.name for activity_feed.profile.
+                pid = str(row.get("profileId") or "").strip()
+                pr_row = db.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone() if pid else None
+                act_profile = str(pr_row["name"]) if pr_row and pr_row.get("name") else str(row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        str(row["profileName"] or "SYSTEM"),
+                        act_profile,
                         str(row["originGroup"] or "Inbox"),
                         f"DM sent to {contact_name}",
                         ts,
