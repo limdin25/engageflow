@@ -239,3 +239,20 @@ Verification: curl https://engageflow-dev.up.railway.app/health after setting EN
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #11 — Activity Timeline display: interleave + dedupe (UI-only)
+
+Date: 2026-03-04
+Change: Activity Timeline display: dedupe exact duplicates (by id or profile+groupName+action+timestamp), interleave by profile (round-robin), preserve per-profile order. No long runs of same email; no duplicate rows. N=30 for initial display.
+Files:
+- frontend/src/lib/activityTimeline.ts (dedupeActivities, interleaveByProfile)
+- frontend/src/lib/activityTimeline.test.ts (TDD)
+- frontend/src/pages/DashboardPage.tsx (use processedActivity = interleaveByProfile(dedupeActivities(filteredActivity)))
+
+Tests: npm test (5 passed), npm run build (success)
+Verification: https://selfless-renewal-dev.up.railway.app — Activity Timeline interleaved, no duplicates
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

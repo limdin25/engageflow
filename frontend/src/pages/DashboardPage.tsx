@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Users, MessageSquare, Sparkles, Clock, Activity, ChevronDown, ChevronUp, ExternalLink, Download, Key, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useActivity, useAutomationSettings, useCommunities, useProfiles, useQueue } from "@/hooks/useEngageFlow";
 import { ApiError, api } from "@/lib/api";
+import { dedupeActivities, interleaveByProfile } from "@/lib/activityTimeline";
 import NextActionsDrawer from "@/components/NextActionsDrawer";
 import { useBackend } from "@/context/BackendContext";
 import { toast } from "sonner";
@@ -552,7 +553,8 @@ export default function DashboardPage() {
     if (activityFilterProfile && item.profile !== activityFilterProfile) return false;
     return true;
   });
-  const displayedActivity = activityExpanded ? filteredActivity : filteredActivity.slice(0, 30);
+  const processedActivity = interleaveByProfile(dedupeActivities(filteredActivity));
+  const displayedActivity = activityExpanded ? processedActivity : processedActivity.slice(0, 30);
   const activityLastUpdatedAt = activityQuery.dataUpdatedAt ?? 0;
   const queueLastUpdatedAt = queueQuery.dataUpdatedAt ?? 0;
   const newestActivityTs = filteredActivity[0] ? parseServerTimestamp(String(filteredActivity[0].timestamp || "")) : 0;
@@ -560,7 +562,7 @@ export default function DashboardPage() {
 
   const handleExportCSV = () => {
     const csv = "Profile,Group,Action,Timestamp,Post URL\n" +
-      filteredActivity.map((a) => `"${a.profile}","${a.groupName}","${a.action}","${a.timestamp}","${a.postUrl}"`).join("\n");
+      processedActivity.map((a) => `"${a.profile}","${a.groupName}","${a.action}","${a.timestamp}","${a.postUrl}"`).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -797,15 +799,15 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
-          {!activityExpanded && filteredActivity.length > 30 && (
+          {!activityExpanded && processedActivity.length > 30 && (
             <button
               onClick={() => setActivityExpanded(true)}
               className="w-full py-2.5 text-xs text-primary hover:bg-muted/50 transition-colors border-t border-border"
             >
-              Show all {filteredActivity.length} activity rows
+              Show all {processedActivity.length} activity rows
             </button>
           )}
-          {activityExpanded && filteredActivity.length > 30 && (
+          {activityExpanded && processedActivity.length > 30 && (
             <button
               onClick={() => setActivityExpanded(false)}
               className="w-full py-2.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors border-t border-border"

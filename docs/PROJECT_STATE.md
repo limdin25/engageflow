@@ -81,7 +81,7 @@ The system is considered healthy when:
 
 - **Action Queue:** Up to 30 upcoming actions (queue=30, not capped at 2/6). "Updated: Xs ago" shown.
 - **Profile interleaving (Robinhood rule):** No two consecutive items from same profile when multiple profiles have actions; single-profile repeats allowed.
-- **Activity Timeline:** Newest first (ORDER BY timestamp DESC); last comment/action at top. Auto-refresh every 10s; refetch on window focus. "Last updated: Xs ago". "No new activity detected in last N min" when newest &gt; 10 min old.
+- **Activity Timeline:** Newest first (ORDER BY timestamp DESC); last comment/action at top. **Display:** dedupe by id (or profile+groupName+action+timestamp), interleave by profile (round-robin), slice 30. UI-only; no backend changes. Auto-refresh every 10s; refetch on window focus. "Last updated: Xs ago". "No new activity detected in last N min" when newest &gt; 10 min old.
 - **Countdown:** Always visible; ticks every second ("Next action in 14m 22s"); "No actions scheduled" when empty.
 
 ### H) DEV UI verification (Hugo)
