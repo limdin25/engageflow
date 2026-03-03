@@ -1,4 +1,4 @@
-# EngageFlow
+# SkoolProjectUP
 
 Automation platform for Skool workflows:
 - backend: FastAPI API + automation engine

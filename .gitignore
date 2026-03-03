@@ -14,6 +14,8 @@ frontend/dist-ssr/
 frontend/*.local
 
 # Root artifacts
+*.db
+engageflow.db
 node_modules/
 dist/
 dist-ssr/
@@ -23,6 +25,7 @@ dist-ssr/
 backend/__pycache__/
 backend/*.py[cod]
 backend/*.db
+backend/*.sqlite
 backend/skool_accounts/
 backend/skool_daily_counters_state.json
 backend/skool_global_blacklist.json
@@ -30,12 +33,21 @@ backend/skool_run_state.json
 backend/config.local.json
 backend/logs/
 backend/.env
+backend/venv/
 .env
 .env.*
+backend/.venv/
+backend/.claude_state/
+backend/.claude/
 
 # Python cache (fallback)
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+
+# Playwright cache
+playwright/.cache/
 
 # Editor directories and files
 .vscode/*

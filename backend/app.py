@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from security_utils import decrypt_secret, encrypt_secret, is_encrypted_secret, mask_secret
 from proxy_slots import acquire_proxy_slot, release_proxy_slot
+from joiner import ensure_joiner_tables, create_joiner_router, joiner_worker_loop
 
 
 def _load_local_env_file() -> None:
@@ -61,7 +62,7 @@ except Exception:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_AVAILABLE = False
 
-DB_PATH = Path(os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db")))
+DB_PATH = Path(__file__).parent / "engageflow.db"
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
@@ -97,8 +98,6 @@ _SKOOL_CHAT_IMPORT_CACHE: Dict[str, Any] = {
     "dm_log_last": {},
 }
 _SKOOL_CHAT_SYNC_LOCK = threading.Lock()
-_LOG_BUFFER: List[Dict[str, Any]] = []
-_LOG_BUFFER_LOCK = threading.Lock()
 _PLAYWRIGHT_SYNC_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE: Dict[str, float] = {}
@@ -184,6 +183,9 @@ _setup_application_logging()
 async def lifespan(app: FastAPI):
     app.state.automation_engine = AutomationEngine(DB_PATH, Path(__file__).parent)
     await app.state.automation_engine.recover_after_restart()
+    global _AUTOMATION_ENGINE_REF
+    _AUTOMATION_ENGINE_REF = app.state.automation_engine
+    # app.state.automation_engine.set_ensure_profile_auth(ensure_profile_auth)  # disabled - engine lacks method
     app.state.profile_login_monitor_task = asyncio.create_task(
         _profile_login_monitor_loop(app),
         name="profile-login-monitor",
@@ -194,6 +196,11 @@ async def lifespan(app: FastAPI):
             _skool_chat_sync_loop(),
             name="skool-chat-sync",
         )
+    # Phase 3 — Joiner background worker (no-op when JOINER_ENABLED=false)
+    app.state.joiner_worker_task = asyncio.create_task(
+        joiner_worker_loop(get_db),
+        name="joiner-worker",
+    )
     try:
         yield
     finally:
@@ -209,6 +216,13 @@ async def lifespan(app: FastAPI):
             monitor_task.cancel()
             try:
                 await monitor_task
+            except asyncio.CancelledError:
+                pass
+        joiner_task = getattr(app.state, "joiner_worker_task", None)
+        if joiner_task:
+            joiner_task.cancel()
+            try:
+                await joiner_task
             except asyncio.CancelledError:
                 pass
         try:
@@ -305,8 +319,108 @@ def get_db():
         conn.close()
 
 
+# Joiner router (Phase 2 — DB + API skeleton, no Playwright)
+app.include_router(create_joiner_router(get_db))
+
 def get_automation_engine(request: Request) -> AutomationEngine:
     return request.app.state.automation_engine
+
+_AUTOMATION_ENGINE_REF: Optional[AutomationEngine] = None
+
+SKOOL_AUTH_CHECK_URL = "https://api2.skool.com/self/groups?offset=0&limit=1&prefs=false&members=true"
+
+
+def ensure_profile_auth(profile_id: str) -> dict:
+    """Shared auth gate. Returns {ok, cookie_json, status, message, refresh_attempted, refresh_result}.
+    Used by fetch, join, comment flows. One retry on 401/403."""
+    import urllib.request
+    import urllib.error
+    result = {"ok": False, "cookie_json": None, "status": "unknown", "message": "", "refresh_attempted": False, "refresh_result": None}
+    with get_db() as db:
+        row = db.execute("SELECT id, cookie_json, email, password FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not row:
+            result["status"] = "profile_not_found"
+            result["message"] = "Profile not found"
+            return result
+        cookie_json = (row["cookie_json"] or "").strip() if row["cookie_json"] else ""
+        if not cookie_json:
+            result["status"] = "login_required"
+            result["message"] = "No cookies / not logged in"
+            return result
+    cookies = _cookies_from_json(cookie_json)
+    if not cookies:
+        result["status"] = "login_required"
+        result["message"] = "No cookies / not logged in"
+        return result
+    headers = {
+        "Cookie": cookies,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://www.skool.com",
+        "Referer": "https://www.skool.com/",
+    }
+    req = urllib.request.Request(SKOOL_AUTH_CHECK_URL, headers=headers, method="GET")
+    got_401_403 = False
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            if 200 <= resp.status < 300:
+                result["ok"] = True
+                result["status"] = "ok"
+                result["cookie_json"] = cookie_json
+                result["message"] = "Auth valid"
+                return result
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403):
+            result["status"] = "api_error"
+            result["message"] = f"Skool API HTTP {e.code}"
+            return result
+        got_401_403 = True
+    except Exception as exc:
+        err = str(exc).lower()
+        if "401" in err or "403" in err:
+            got_401_403 = True
+        else:
+            result["status"] = "network_error"
+            result["message"] = str(exc)[:200]
+            return result
+    if not got_401_403:
+        return result
+    LOGGER.info("[AUTH] profile=%s Skool API 401/403, attempting refresh", profile_id)
+    result["refresh_attempted"] = True
+    engine = _AUTOMATION_ENGINE_REF
+    if not engine:
+        result["status"] = "login_required"
+        result["message"] = "Cookies invalid/expired; refresh unavailable"
+        return result
+    refresh = engine.run_profile_login_refresh_sync(profile_id)
+    LOGGER.info("[AUTH] profile=%s refresh_attempted=true refresh_result=%s", profile_id, refresh.get("status", "failed"))
+    result["refresh_result"] = refresh.get("status", "failed")
+    if refresh.get("success") and refresh.get("cookie_json"):
+        new_cookies = _cookies_from_json(refresh["cookie_json"])
+        if new_cookies:
+            req2 = urllib.request.Request(SKOOL_AUTH_CHECK_URL, headers={**headers, "Cookie": new_cookies}, method="GET")
+            try:
+                with urllib.request.urlopen(req2, timeout=12) as resp2:
+                    if 200 <= resp2.status < 300:
+                        result["ok"] = True
+                        result["status"] = "ok"
+                        result["cookie_json"] = refresh["cookie_json"]
+                        result["message"] = "Auth refreshed"
+                        return result
+            except Exception:
+                pass
+    if refresh.get("status") == "captcha":
+        result["status"] = "captcha"
+        result["message"] = refresh.get("message", "Captcha required")
+        return result
+    if refresh.get("status") == "network_error" and "blocked" in (refresh.get("message") or "").lower():
+        result["status"] = "blocked"
+        result["message"] = refresh.get("message", "Account blocked")
+        return result
+    result["status"] = "login_required"
+    result["message"] = refresh.get("message", "Login required") or "Cookies invalid/expired"
+    return result
+
 
 
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
@@ -498,59 +612,9 @@ def _insert_backend_log(
         _db_commit_with_retry(db)
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower():
-            with _LOG_BUFFER_LOCK:
-                _LOG_BUFFER.append({
-                    "profile": profile,
-                    "status": status,
-                    "module": module_value,
-                    "action": action_value,
-                    "message": normalized_message,
-                    "ts": now_display_time(),
-                })
-            LOGGER.warning(
-                "Buffered log write due to sqlite lock: profile=%s status=%s (buffer_size=%d)",
-                profile, status, len(_LOG_BUFFER),
-            )
+            LOGGER.warning("Skipped log write due to sqlite lock: profile=%s status=%s", profile, status)
             return
         raise
-
-
-def _flush_log_buffer(db: sqlite3.Connection) -> None:
-    """Retry buffered log writes; call after sync cycle when DB lock is released."""
-    with _LOG_BUFFER_LOCK:
-        pending = list(_LOG_BUFFER)
-        _LOG_BUFFER.clear()
-
-    requeue: List[Dict[str, Any]] = []
-    for entry in pending:
-        try:
-            ts = entry.get("ts") or now_display_time()
-            try:
-                _db_execute_with_retry(
-                    db,
-                    "INSERT INTO logs (id, timestamp, profile, status, module, action, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["module"], entry["action"], entry["message"], None),
-                )
-            except sqlite3.OperationalError as col_exc:
-                if "no column named module" not in str(col_exc).lower() and "no column named action" not in str(col_exc).lower():
-                    raise
-                _db_execute_with_retry(
-                    db,
-                    "INSERT INTO logs (id, timestamp, profile, status, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["message"], None),
-                )
-            _db_commit_with_retry(db)
-        except sqlite3.OperationalError as exc:
-            if "locked" in str(exc).lower():
-                requeue.append(entry)
-            else:
-                raise
-        except Exception:
-            requeue.append(entry)
-
-    if requeue:
-        with _LOG_BUFFER_LOCK:
-            _LOG_BUFFER[:0] = requeue
 
 
 def _emit_dm_sync_log_once(
@@ -934,7 +998,7 @@ def _extract_logged_in_profile_slug(page: Any) -> str:
               const endpoints = [
                 "https://api2.skool.com/self",
                 "https://api2.skool.com/self/member",
-                "https://api2.skool.com/self/profile",
+                "https://api2.skool.com/self",
                 "https://api2.skool.com/self/account",
               ];
               for (const url of endpoints) {
@@ -1659,6 +1723,7 @@ def _goto_skool_entry_page(page: Any, timeout_ms: int) -> tuple[bool, str]:
     if not PLAYWRIGHT_AVAILABLE:
         return False, "Playwright is not available"
     attempts = [
+        "https://www.skool.com/chat",
         "https://www.skool.com/",
     ]
     last_error = ""
@@ -1669,14 +1734,7 @@ def _goto_skool_entry_page(page: Any, timeout_ms: int) -> tuple[bool, str]:
                 page.wait_for_load_state("networkidle", timeout=9000)
             except Exception:
                 pass
-            try:
-                page.wait_for_selector(
-                    "div[class*='TopNav'], button[class*='ChatNotificationsIconButton'], a[href^='/@']",
-                    timeout=1800,
-                    state="visible",
-                )
-            except Exception:
-                pass
+            page.wait_for_timeout(1800)
             return True, url
         except Exception as exc:
             last_error = str(exc or "")
@@ -1982,112 +2040,154 @@ def _normalize_skool_community_url(path_or_url: str) -> str:
         return raw
 
 
-# Fetch communities for one profile by opening Skool switcher and resolving each community URL.
-def _fetch_skool_communities_for_profile(
-    profile_id: str,
-    profile_name: str,
-    proxy: Optional[str],
-) -> tuple[List[Dict[str, str]], Optional[str]]:
-    if not PLAYWRIGHT_AVAILABLE:
-        return [], "Playwright is not available on backend"
-    browser_dir = Path(__file__).parent / "skool_accounts" / profile_id / "browser"
-    if not browser_dir.exists():
-        return [], "Browser session directory is missing"
+def _is_community_active_member(page, url: str, timeout_ms: int = 8000) -> bool:
+    """Check if profile is active member (exclude pending/join-request). Matches community-join-manager logic."""
+    try:
+        page.set_default_timeout(timeout_ms)
+        resp = page.goto(url, timeout=timeout_ms)
+        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(1500)
+        if resp and (resp.status == 404 or resp.status >= 500):
+            return False
+        if "/login" in str(page.url or "").lower():
+            return False
+        txt = page.inner_text("body") or ""
+        txt_lower = txt.lower()
+        if re.search(r"invite\s+people|invite\s+others|invite\s+members|leave\s+group", txt_lower):
+            return True
+        if re.search(r"pending|you requested membership|cancel request", txt_lower):
+            return False
+        return False
+    except Exception:
+        return False
 
-    with _PLAYWRIGHT_SYNC_LOCK:
-        playwright = None
-        context = None
+
+SKOOL_GROUPS_URL = "https://api2.skool.com/self/groups?offset={offset}&limit=30&prefs=false&members=true"
+
+
+def _cookies_from_json(cookie_json) -> str:
+    if not cookie_json or not str(cookie_json).strip():
+        return ""
+    try:
+        c = json.loads(cookie_json) if isinstance(cookie_json, str) else cookie_json
+        arr = c if isinstance(c, list) else [c]
+        return "; ".join(str(x.get("name", "")) + "=" + str(x.get("value", "")) for x in arr if x.get("name"))
+    except Exception:
+        return ""
+
+
+def skool_api_get_groups(cookie_json, timeout=15, profile_id=None, _retry_count=0):
+    """Fetch /self/groups with cookie_json. On 401/403, one retry via ensure_profile_auth if profile_id given."""
+    import urllib.request
+    import urllib.error
+    cookies = _cookies_from_json(cookie_json)
+    if not cookies:
+        raise ValueError("No cookies / not logged in")
+    headers = {
+        "Cookie": cookies,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://www.skool.com",
+        "Referer": "https://www.skool.com/",
+    }
+    all_groups = []
+    offset = 0
+    for _ in range(50):
+        url = SKOOL_GROUPS_URL.format(offset=offset)
+        req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            playwright = _start_playwright_safe()
-            launch_kwargs: Dict[str, Any] = {
-                "user_data_dir": str(browser_dir),
-                "headless": True,
-                "viewport": {"width": 1600, "height": 1100},
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            }
-            proxy_cfg = _parse_proxy_to_playwright(proxy)
-            if proxy_cfg:
-                launch_kwargs["proxy"] = proxy_cfg
-            context = playwright.chromium.launch_persistent_context(**launch_kwargs)
-            page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(12000)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status in (401, 403):
+                    raise ValueError("cookies invalid/expired")
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and profile_id and _retry_count == 0:
+                auth = ensure_profile_auth(profile_id)
+                LOGGER.info("[FETCH] auth_check_ok=%s refresh_attempted=%s refresh_result=%s", auth.get("ok"), auth.get("refresh_attempted"), auth.get("refresh_result"))
+                if auth.get("ok") and auth.get("cookie_json"):
+                    return skool_api_get_groups(auth["cookie_json"], timeout, profile_id, _retry_count=1)
+            raise ValueError("cookies invalid/expired" if e.code in (401, 403) else f"API HTTP {e.code}")
+        except Exception as e:
+            err = str(e).lower()
+            if ("401" in err or "403" in err) and profile_id and _retry_count == 0:
+                auth = ensure_profile_auth(profile_id)
+                LOGGER.info("[FETCH] auth_check_ok=%s refresh_attempted=%s refresh_result=%s", auth.get("ok"), auth.get("refresh_attempted"), auth.get("refresh_result"))
+                if auth.get("ok") and auth.get("cookie_json"):
+                    return skool_api_get_groups(auth["cookie_json"], timeout, profile_id, _retry_count=1)
+            if "401" in err or "403" in err:
+                raise ValueError("cookies invalid/expired")
+            raise
+        groups = data.get("groups") or data.get("data") or (data if isinstance(data, list) else [])
+        all_groups.extend(groups)
+        if not data.get("has_more", False):
+            break
+        offset += 30
+    return all_groups
 
-            nav_ok, nav_info = _goto_skool_entry_page(page, SKOOL_CHAT_NAV_TIMEOUT_MS)
-            if not nav_ok:
-                return [], f"Skool navigation failed: {nav_info}"
-            if "/login" in str(page.url or "").lower():
-                return [], "Profile is not logged in to Skool"
 
-            if not _open_community_switcher_dropdown(page):
-                return [], "Could not open community switcher dropdown"
+def _membership_status(group):
+    try:
+        meta = group.get("metadata")
+        if isinstance(meta, str):
+            meta = json.loads(meta) if meta.strip() else {}
+        meta = meta or {}
+        member = meta.get("member")
+        if isinstance(member, str):
+            member = json.loads(member) if member.strip() else {}
+        member = member or {}
+        role = (member.get("role") or "").strip().lower()
+        if role == "pending":
+            return "pending"
+        if role == "member" or (role and role != "pending"):
+            return "joined"
+        return "unknown"
+    except Exception:
+        return "unknown"
 
-            items = _extract_community_switcher_items(page)
-            if not items:
-                return [], "No community entries found in switcher"
-
-            discovered: Dict[str, Dict[str, str]] = {}
-            attempted = 0
-            pending_names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
-            for item in items:
-                name = str(item.get("name") or "").strip()
-                href = _normalize_skool_community_url(str(item.get("href") or "").strip())
-                if not name:
-                    continue
-                if href and "/signup" not in href and "/chat" not in href:
-                    discovered[href] = {"name": name, "url": href}
-
-            # Resolve entries that have no direct href by clicking each community row.
-            unresolved = [name for name in pending_names if name and not any(v.get("name") == name for v in discovered.values())]
-            for community_name in unresolved:
-                if not _open_community_switcher_dropdown(page):
-                    continue
-                attempted += 1
-                before_url = str(page.url or "")
-                if not _click_community_switcher_item_by_name(page, community_name):
-                    continue
-                # Wait for SPA route/navigation update after switcher click.
-                deadline = time.time() + 8.0
-                while time.time() < deadline:
-                    try:
-                        page.wait_for_timeout(250)
-                    except Exception:
-                        break
-                    current_url = str(page.url or "").strip()
-                    if current_url and current_url != before_url:
-                        normalized = _normalize_skool_community_url(current_url)
-                        if normalized and "/signup" not in normalized and "/chat" not in normalized:
-                            discovered[normalized] = {"name": community_name, "url": normalized}
-                        break
-
-            discovered_list = list(discovered.values())
-            if not discovered_list:
-                if items:
-                    return [], (
-                        f"Community switcher opened, entries detected={len(items)}, "
-                        f"but no community URLs were resolved (attempted_clicks={attempted})"
-                    )
-                return [], "No community entries found in switcher"
-            return discovered_list, None
-        except Exception as exc:
-            return [], f"Community fetch failed: {str(exc)[:220] or 'unknown error'}"
-        finally:
+# Fetch communities (API-driven) and resolving each community URL.
+def _fetch_skool_communities_for_profile(profile_id, profile_name, proxy, cookie_json=None):
+    auth = ensure_profile_auth(profile_id)
+    if not auth.get("ok"):
+        status = auth.get("status", "login_required")
+        msg = auth.get("message", "Login required")
+        stats = {"auth_status": status, "refresh_attempted": auth.get("refresh_attempted"), "refresh_result": auth.get("refresh_result")}
+        return [], msg, stats
+    cookie_json = auth.get("cookie_json") or cookie_json
+    if not cookie_json or not str(cookie_json).strip():
+        return [], "No cookies / not logged in", None
+    try:
+        groups = skool_api_get_groups(cookie_json, profile_id=profile_id)
+    except ValueError as e:
+        return [], str(e), None
+    except Exception as e:
+        return [], f"API fetch failed: {str(e)[:180]}", None
+    total = len(groups)
+    joined_count = pending_count = unknown_count = 0
+    discovered = []
+    for g in groups:
+        status = _membership_status(g)
+        if status == "pending":
+            pending_count += 1
+            continue
+        if status == "unknown":
+            unknown_count += 1
+            continue
+        joined_count += 1
+        slug = str(g.get("slug") or g.get("groupSlug") or g.get("name") or "").strip()
+        if not slug:
+            continue
+        meta = g.get("metadata") or {}
+        if isinstance(meta, str):
             try:
-                if context:
-                    context.close()
+                meta = json.loads(meta) if meta.strip() else {}
             except Exception:
-                pass
-            try:
-                if playwright:
-                    playwright.stop()
-            except Exception:
-                pass
+                meta = {}
+        meta = meta or {}
+        name = str(meta.get("display_name") or g.get("name") or g.get("title") or slug or "").strip()
+        discovered.append({"name": name, "url": f"https://www.skool.com/{slug}"})
+    LOGGER.info(f"[FETCH] profile={profile_name} total={total} joined={joined_count} pending_excluded={pending_count} unknown_excluded={unknown_count}")
+    return discovered, None, {"total": total, "joined": joined_count, "pending_excluded": pending_count, "unknown_excluded": unknown_count}
 
-
-# Upsert discovered communities for one profile and preserve existing limits/counters.
 def _upsert_profile_communities_from_sync(
     db: sqlite3.Connection,
     profile_id: str,
@@ -3050,13 +3150,16 @@ def _fetch_live_skool_chat_cards(
     expected_identities: Optional[List[str]] = None,
     known_profile_slugs: Optional[Set[str]] = None,
     cached_cards_by_chat: Optional[Dict[str, Dict[str, Any]]] = None,
+    cookie_json: Optional[str] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
     if not PLAYWRIGHT_AVAILABLE:
         return [], "Playwright is not available on backend"
 
     browser_dir = Path(__file__).parent / "skool_accounts" / profile_id / "browser"
+
     if not browser_dir.exists():
-        return [], "Browser session directory is missing"
+        browser_dir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info(f"[FETCH] Created missing browser session directory for profile {profile_id}: {browser_dir}")
 
     last_error_message: Optional[str] = None
     nav_timeout_ms = SKOOL_CHAT_NAV_TIMEOUT_MS
@@ -3107,6 +3210,28 @@ def _fetch_live_skool_chat_cards(
                     page.set_default_timeout(12000)
                     page_ready = False
                     try:
+                        if cookie_json and cookie_json.strip():
+                            try:
+                                import json as _json
+                                arr = _json.loads(cookie_json) if isinstance(cookie_json, str) else cookie_json
+                                if isinstance(arr, dict):
+                                    arr = [arr]
+                                pw_cookies = []
+                                for x in (arr or []):
+                                    name = x.get("name") or x.get("key")
+                                    value = str(x.get("value", ""))
+                                    if name:
+                                        pw_cookies.append({
+                                            "name": str(name),
+                                            "value": value,
+                                            "domain": ".skool.com",
+                                            "path": "/",
+                                        })
+                                if pw_cookies:
+                                    page.goto("https://www.skool.com/", wait_until="domcontentloaded", timeout=15000)
+                                    context.add_cookies(pw_cookies)
+                            except Exception as _cookie_exc:
+                                LOGGER.warning("Inbox sync cookie inject failed for %s: %s", profile_id, _cookie_exc)
                         nav_ok, _ = _goto_skool_entry_page(page, nav_timeout_ms)
                         page_ready = bool(nav_ok)
                     except Exception:
@@ -3469,6 +3594,7 @@ def _fetch_live_skool_chat_cards_with_timeout(
     expected_identities: Optional[List[str]] = None,
     known_profile_slugs: Optional[Set[str]] = None,
     cached_cards_by_chat: Optional[Dict[str, Dict[str, Any]]] = None,
+    cookie_json: Optional[str] = None,
     timeout_seconds: int = SKOOL_CHAT_PROFILE_SYNC_TIMEOUT_SECONDS,
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
     try:
@@ -3480,6 +3606,7 @@ def _fetch_live_skool_chat_cards_with_timeout(
             expected_identities,
             known_profile_slugs,
             cached_cards_by_chat,
+            cookie_json,
         )
     except Exception as exc:
         return [], f"Live DM sync failed: {str(exc)[:220] or 'unknown error'}"
@@ -3901,7 +4028,7 @@ def _try_ai_auto_reply(
                         activity_profile,
                         origin_group,
                         activity_action,
-                        now_display_time(),
+                        datetime.now(timezone.utc).isoformat(),
                         activity_post_url,
                     ),
                 )
@@ -3937,12 +4064,7 @@ def _backfill_dm_activity_from_logs(db: sqlite3.Connection, *, limit: int = 5000
     for row in reversed(rows):
         scanned += 1
         profile = str(row["profile"] or "SYSTEM").strip() or "SYSTEM"
-        _pr = db.execute(
-            "SELECT name FROM profiles WHERE name = ? OR username = ? OR email = ? LIMIT 1",
-            (profile, profile, profile),
-        ).fetchone()
-        profile = str(_pr["name"]) if _pr and _pr.get("name") else profile
-        timestamp = str(row["timestamp"] or "").strip() or now_display_time()
+        timestamp = str(row["timestamp"] or "").strip() or datetime.now(timezone.utc).isoformat()
         message = str(row["message"] or "").strip()
 
         match = pattern_ai_auto_sent.search(message) or pattern_dm_sent.search(message)
@@ -4552,7 +4674,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
         return
     profile_rows = db.execute(
         """
-        SELECT id, name, proxy, email
+        SELECT id, name, proxy, email, cookie_json
         FROM profiles
         WHERE lower(trim(coalesce(status, ''))) IN ('ready', 'running')
         ORDER BY name
@@ -4621,8 +4743,6 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
             for idx, profile_row in enumerate(selected_profiles):
                 profile_id = str(profile_row["id"])
                 profile_name = str(profile_row["name"])
-                # Update profile_last_attempt immediately so rotation advances even on error.
-                profile_last_attempt[profile_id] = now_ts
                 cached_cards_by_chat: Dict[str, Dict[str, Any]] = {}
                 for cached_card in previous_live_cards:
                     if str(cached_card.get("profile_id") or "").strip() != profile_id:
@@ -4631,6 +4751,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
                     if not cached_chat_id:
                         continue
                     cached_cards_by_chat[cached_chat_id] = cached_card
+                profile_last_attempt[profile_id] = now_ts
                 profile_started_at = time.monotonic()
                 profile_cards: List[Dict[str, Any]] = []
                 sync_error: Optional[str] = None
@@ -4642,6 +4763,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
                         expected_identities=[str(profile_row["name"] or ""), str(profile_row["email"] or "")],
                         known_profile_slugs=known_profile_slugs,
                         cached_cards_by_chat=cached_cards_by_chat,
+                        cookie_json=(str(profile_row["cookie_json"] or "").strip() or None),
                     )
                     if not sync_error:
                         break
@@ -4820,10 +4942,6 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
 
         db.commit()
     finally:
-        try:
-            _flush_log_buffer(db)
-        except Exception:
-            LOGGER.exception("_flush_log_buffer failed in finally block — ignoring")
         _SKOOL_CHAT_SYNC_LOCK.release()
 
 
@@ -4916,6 +5034,9 @@ def ensure_tables() -> None:
         if "maxPostAgeDays" not in community_columns:
             db.execute("ALTER TABLE communities ADD COLUMN maxPostAgeDays INTEGER NOT NULL DEFAULT 0")
         db.execute("UPDATE communities SET maxPostAgeDays = 0 WHERE maxPostAgeDays IS NULL OR maxPostAgeDays < 0")
+        pc = {str(r["name"]) for r in db.execute("PRAGMA table_info(profiles)").fetchall()}
+        if "cookie_json" not in pc:
+            db.execute("ALTER TABLE profiles ADD COLUMN cookie_json TEXT")
         profile_rows = db.execute("SELECT id, password FROM profiles").fetchall()
         for row in profile_rows:
             raw_password = str(row["password"] or "")
@@ -4926,6 +5047,7 @@ def ensure_tables() -> None:
                 (encrypt_secret(raw_password), row["id"]),
             )
         _load_proxy_cache_from_db(db)
+        ensure_joiner_tables(db)
         db.commit()
 
 
@@ -4992,6 +5114,8 @@ class ProfileModel(BaseModel):
     groupsConnected: int
     hasPassword: bool = False
     proxyStatus: Optional[str] = None
+    source: Optional[str] = None
+    connected_at: Optional[str] = None
 
 
 class ProfileCreateModel(BaseModel):
@@ -5014,6 +5138,11 @@ class ProfileUpdateModel(BaseModel):
     status: Optional[str] = None
     dailyUsage: Optional[int] = None
     groupsConnected: Optional[int] = None
+
+
+class ConnectSkoolModel(BaseModel):
+    email: str
+    password: str
 
 
 class CommunityModel(BaseModel):
@@ -5067,6 +5196,10 @@ class CommunityFetchProfileResultModel(BaseModel):
     created: int
     updated: int
     skipped: int
+    total: Optional[int] = None
+    joined: Optional[int] = None
+    pendingExcluded: Optional[int] = None
+    unknownExcluded: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -5078,6 +5211,10 @@ class CommunityFetchResponseModel(BaseModel):
     created: int
     updated: int
     skipped: int
+    totalFetched: Optional[int] = None
+    totalJoined: Optional[int] = None
+    totalPendingExcluded: Optional[int] = None
+    totalUnknownExcluded: Optional[int] = None
     results: List[CommunityFetchProfileResultModel]
 
 
@@ -5712,7 +5849,71 @@ def build_profile_model(row: sqlite3.Row) -> ProfileModel:
         groupsConnected=groups_connected,
         hasPassword=bool(str(data.get("password") or "").strip()),
         proxyStatus=proxy_status,
+        source=data.get("source"),
+        connected_at=data.get("connected_at"),
     )
+
+
+@app.get("/debug/scheduler")
+async def debug_scheduler(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    snapshot = await engine.get_debug_snapshot()
+    return JSONResponse(snapshot)
+
+
+
+
+# ==================== BROWSER LOCK SYSTEM ====================
+def acquire_browser_lock(profile_id: str, locker: str = 'engageflow') -> bool:
+    """Acquire lock before launching browser."""
+    with get_db() as db:
+        existing = db.execute(
+            'SELECT locked_by FROM browser_locks WHERE profile_id = ?',
+            (profile_id,)
+        ).fetchone()
+        if existing and existing['locked_by'] != locker:
+            raise Exception(f"Browser locked by {existing['locked_by']}")
+        now = datetime.now().isoformat()
+        db.execute(
+            'INSERT INTO browser_locks (profile_id, locked_by, locked_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(profile_id) DO UPDATE SET locked_by = ?, locked_at = ?',
+            (profile_id, locker, now, locker, now)
+        )
+        db.commit()
+    return True
+
+def release_browser_lock(profile_id: str):
+    """Release lock after browser closes."""
+    with get_db() as db:
+        db.execute('DELETE FROM browser_locks WHERE profile_id = ?', (profile_id,))
+        db.commit()
+
+@app.get("/health")
+async def health_check(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    status = await engine.get_status()
+    if not status.get("isRunning"):
+        return JSONResponse({"status": "ok", "running": False})
+    hb_path = engine.heartbeat_file
+    try:
+        data = json.loads(hb_path.read_text(encoding="utf-8"))
+        age = time.time() - float(data.get("ts", 0))
+        if age < 120:
+            return JSONResponse({"status": "ok", "running": True, "heartbeat_age_seconds": round(age, 1)})
+        return JSONResponse(
+            {"status": "error", "reason": f"heartbeat stale: age={round(age, 1)}s > 120s"},
+            status_code=500,
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            {"status": "error", "reason": "heartbeat file not found — scheduler may not have run yet"},
+            status_code=500,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"status": "error", "reason": str(exc)},
+            status_code=500,
+        )
 
 
 @app.get("/profiles", response_model=List[ProfileModel])
@@ -5793,6 +5994,44 @@ async def create_profile(payload: ProfileCreateModel, request: Request):
     return build_profile_model(row)
 
 
+@app.post("/connect-skool")
+async def connect_skool(payload: ConnectSkoolModel, request: Request):
+    """Public endpoint for micro-workers to connect Skool accounts. Creates profile with source='micro', status='paused'."""
+    email = (payload.email or "").strip()
+    password_plain = (payload.password or "").strip()
+    if not email or not password_plain:
+        raise HTTPException(400, "email and password are required")
+    profile_id = str(uuid.uuid4())
+    password_encrypted = encrypt_secret(password_plain)
+    name = email.split("@")[0] or email
+    username = email
+    avatar = "".join([part[0] for part in name.split() if part]).upper()[:2] or "NA"
+    connected_at = datetime.now(timezone.utc).isoformat()
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO profiles (id, name, username, password, email, proxy, avatar, status, dailyUsage, groupsConnected, source, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile_id, name, username, password_encrypted, email, None, avatar, "paused", 0, 0, "micro", connected_at),
+        )
+        db.commit()
+    engine = get_automation_engine(request)
+    try:
+        result = await engine.check_login(profile_id)
+        if isinstance(result, dict) and result.get("success"):
+            return {"success": True, "profileId": profile_id, "message": "Connected"}
+        msg = str(result.get("message", "Login failed")) if isinstance(result, dict) else "Login failed"
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, str(e))
+
+
 @app.put("/profiles/{profile_id}", response_model=ProfileModel)
 def update_profile(profile_id: str, payload: ProfileUpdateModel):
     updates = payload.model_dump(exclude_unset=True)
@@ -5842,6 +6081,7 @@ def reset_profile_counters(profile_id: str):
         )
         _db_commit_with_retry(db)
     return {"success": True}
+
 
 
 @app.delete("/profiles/{profile_id}")
@@ -5913,6 +6153,10 @@ def _set_community_fetch_state(**patch: Any) -> None:
 
 # Run community sync in background so UI can track stable progress across page reloads.
 def _run_communities_fetch_job() -> None:
+    total_fetched = 0
+    total_joined = 0
+    total_pending_excluded = 0
+    total_unknown_excluded = 0
     results: List[CommunityFetchProfileResultModel] = []
     total_discovered = 0
     total_created = 0
@@ -5922,7 +6166,7 @@ def _run_communities_fetch_job() -> None:
     try:
         with get_db() as db:
             profile_rows = db.execute(
-                "SELECT id, name, proxy FROM profiles ORDER BY name"
+                "SELECT id, name, proxy, cookie_json FROM profiles ORDER BY name"
             ).fetchall()
             _set_community_fetch_state(
                 profilesTotal=len(profile_rows),
@@ -5940,12 +6184,20 @@ def _run_communities_fetch_job() -> None:
                     currentProfileId=profile_id,
                     currentProfileName=profile_name,
                 )
-                discovered_items, error = _fetch_skool_communities_for_profile(
-                    profile_id=profile_id,
-                    profile_name=profile_name,
-                    proxy=proxy,
+                cookie_json = (profile["cookie_json"] or "").strip() if profile["cookie_json"] else None
+                discovered_items, error, stats = _fetch_skool_communities_for_profile(
+                    profile_id=profile_id, profile_name=profile_name, proxy=proxy, cookie_json=cookie_json
                 )
                 discovered_count = len(discovered_items)
+                st = stats or {}
+                prof_total = st.get("total") or 0
+                prof_joined = st.get("joined") or 0
+                prof_pending = st.get("pending_excluded") or 0
+                prof_unknown = st.get("unknown_excluded") or 0
+                total_fetched += prof_total
+                total_joined += prof_joined
+                total_pending_excluded += prof_pending
+                total_unknown_excluded += prof_unknown
                 created = 0
                 updated = 0
                 skipped = 0
@@ -5974,6 +6226,10 @@ def _run_communities_fetch_job() -> None:
                         created=created,
                         updated=updated,
                         skipped=skipped,
+                        total=prof_total if stats else None,
+                        joined=prof_joined if stats else None,
+                        pendingExcluded=prof_pending if stats else None,
+                        unknownExcluded=prof_unknown if stats else None,
                         error=error,
                     )
                 )
@@ -6000,6 +6256,10 @@ def _run_communities_fetch_job() -> None:
             created=total_created,
             updated=total_updated,
             skipped=total_skipped,
+            totalFetched=total_fetched,
+            totalJoined=total_joined,
+            totalPendingExcluded=total_pending_excluded,
+            totalUnknownExcluded=total_unknown_excluded,
             results=results,
         )
         _set_community_fetch_state(
@@ -6240,6 +6500,239 @@ def update_automation_settings(payload: AutomationSettingsModel):
         )
         db.commit()
     return payload
+
+
+
+@app.post("/communities/auto-register")
+def auto_register_community():
+    """Webhook from joiner: auto-register a newly joined community."""
+    data = request.json or {}
+    profile_id = data.get("profileId", "")
+    slug = data.get("slug", "")
+    name = data.get("name", slug)
+    url = data.get("url", f"https://www.skool.com/{slug}")
+
+    if not profile_id or not slug:
+        return {"error": "profileId and slug required"}, 400
+
+    with get_db() as db:
+        # Check profile exists
+        profile = db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not profile:
+            return {"error": "Profile not found"}, 404
+
+        # Check if community already exists for this profile
+        existing = db.execute(
+            "SELECT id FROM communities WHERE profileId = ? AND url LIKE ?",
+            (profile_id, f"%{slug}%")
+        ).fetchone()
+        if existing:
+            return {"message": "Community already registered", "id": existing["id"]}
+
+        # Create new community with defaults
+        import uuid
+        comm_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        db.execute(
+            """INSERT INTO communities (id, profileId, name, url, dailyLimit, maxPostAgeDays, lastScanned, status, matchesToday, actionsToday, totalScannedPosts, totalKeywordMatches)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (comm_id, profile_id, name, url, 3, 7, now, "active", 0, 0, 0, 0)
+        )
+        db.commit()
+
+    return {"success": True, "id": comm_id, "message": f"Auto-registered {name}"}
+
+@app.get("/queue/preview")
+def queue_preview(limit: int = 50, days: int = 2):
+    """Read-only projected schedule. No DB writes, no Playwright, no mutation."""
+    limit = max(1, min(200, limit))
+    days = max(1, min(7, days))
+    now = datetime.now()
+    end_boundary = now + timedelta(days=days)
+
+    with get_db() as db:
+        profiles = db.execute("SELECT * FROM profiles WHERE status IN ('ready','running','idle') ORDER BY name").fetchall()
+        communities_rows = db.execute("SELECT * FROM communities WHERE status = 'active' ORDER BY name").fetchall()
+        settings_row = db.execute("SELECT value FROM automation_settings WHERE key = 'default'").fetchone()
+        keyword_rules_rows = db.execute("SELECT id, keyword, assignedProfileIds FROM keyword_rules WHERE active = 1").fetchall()
+
+    # Build keywords_by_profile for forecast keyword assignment
+    _keywords_by_profile: Dict[str, List[tuple]] = {}
+    for kr in keyword_rules_rows:
+        assigned = str(kr["assignedProfileIds"] or "")
+        for pid_part in assigned.split(","):
+            pid_part = pid_part.strip()
+            if pid_part:
+                _keywords_by_profile.setdefault(pid_part, []).append((str(kr["id"]), str(kr["keyword"])))
+
+    if not profiles:
+        return []
+
+    profiles = [dict(row) for row in profiles]
+    settings = json.loads(settings_row["value"]) if settings_row else {}
+    global_daily_cap = max(1, int(settings.get("globalDailyCapPerAccount", 5)))
+    scan_interval_minutes = max(1, int(settings.get("scanIntervalMinutes", 5)))
+    step_seconds = scan_interval_minutes * 60
+
+    communities_by_profile: Dict[str, List[Dict[str, Any]]] = {}
+    for row in communities_rows:
+        pid = str(row["profileId"] or "")
+        communities_by_profile.setdefault(pid, []).append(dict(row))
+
+    # Load rotation pointers from run_state
+    rotation_pointers: Dict[str, int] = {}
+    run_state_path = Path(__file__).parent / "skool_run_state.json"
+    try:
+        with open(run_state_path, "r", encoding="utf-8") as f:
+            rs = json.load(f)
+        for p in rs.get("profiles", []):
+            pid = str(p.get("id") or "")
+            if pid:
+                rotation_pointers[pid] = int(p.get("_current_community_index", 0) or 0)
+    except Exception:
+        pass
+
+    # Build per-profile projection state
+    profile_states = []
+    for prof in profiles:
+        pid = str(prof["id"])
+        comms = communities_by_profile.get(pid, [])
+        if not comms:
+            continue
+        done_today = int(prof.get("dailyUsage", 0) or 0)
+        remaining_today = max(0, global_daily_cap - done_today)
+        comm_idx = rotation_pointers.get(pid, 0) % len(comms)
+        profile_states.append({
+            "id": pid,
+            "name": str(prof.get("name") or prof.get("email") or pid),
+            "communities": comms,
+            "comm_idx": comm_idx,
+            "remaining_today": remaining_today,
+            "daily_cap": global_daily_cap,
+            "kw_idx": 0,
+            "keywords": _keywords_by_profile.get(pid, []),
+        })
+
+    if not profile_states:
+        return []
+
+    # Generate interleaved projections round-robin across profiles
+    items = []
+    slot = 0
+    # Track per-day remaining (resets at midnight boundaries)
+    day_remaining: Dict[str, int] = {ps["id"]: ps["remaining_today"] for ps in profile_states}
+    day_comm_actions: Dict[str, Dict[str, int]] = {ps["id"]: {} for ps in profile_states}
+    current_day = now.date()
+
+    while len(items) < limit:
+        added_this_round = False
+        for ps in profile_states:
+            if len(items) >= limit:
+                break
+            pid = ps["id"]
+
+            # Compute projected time for this slot
+            projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
+            if projected_dt > end_boundary:
+                continue
+
+            # Reset daily counters at day boundary
+            proj_day = projected_dt.date()
+            if proj_day != current_day:
+                current_day = proj_day
+                for ps2 in profile_states:
+                    day_remaining[ps2["id"]] = ps2["daily_cap"]
+                    day_comm_actions[ps2["id"]] = {}
+
+            if day_remaining[pid] <= 0:
+                continue
+
+            # Find next eligible community using rotation pointer
+            comms = ps["communities"]
+            found_community = None
+            for _ in range(len(comms)):
+                c = comms[ps["comm_idx"] % len(comms)]
+                ps["comm_idx"] += 1
+                cid = str(c.get("id") or "")
+                c_limit = int(c.get("dailyLimit") or 0)
+                c_used = int(day_comm_actions.get(pid, {}).get(cid, 0) or 0)
+                if c_limit > 0 and c_used >= c_limit:
+                    continue
+                found_community = c
+                break
+
+            if not found_community:
+                continue
+
+            cid = str(found_community.get("id") or "")
+            day_comm_actions.setdefault(pid, {})[cid] = int(day_comm_actions.get(pid, {}).get(cid, 0) or 0) + 1
+            day_remaining[pid] -= 1
+
+            display_time = _format_queue_display_time(projected_dt)
+            local_tz = now.astimezone().tzinfo
+            scheduled_for_iso = projected_dt.replace(tzinfo=local_tz).isoformat(timespec="seconds") if local_tz else projected_dt.isoformat(timespec="seconds")
+
+            day_label = ""
+            delta_days = (projected_dt.date() - now.date()).days
+            if delta_days == 1:
+                day_label = "Tomorrow"
+            elif delta_days > 1:
+                day_label = projected_dt.strftime("%a %b %d")
+
+            # Pick keyword via round-robin
+            kw_name = ""
+            kw_id = ""
+            if ps.get("keywords"):
+                kw_entry = ps["keywords"][ps["kw_idx"] % len(ps["keywords"])]
+                kw_id = kw_entry[0]
+                kw_name = kw_entry[1]
+                ps["kw_idx"] += 1
+
+            items.append({
+                "id": f"preview-{len(items)}",
+                "profile": ps["name"],
+                "profileId": pid,
+                "community": str(found_community.get("name") or ""),
+                "communityId": cid,
+                "postId": "",
+                "keyword": kw_name,
+                "keywordId": kw_id,
+                "scheduledTime": display_time,
+                "scheduledFor": scheduled_for_iso,
+                "priorityScore": 0,
+                "countdown": max(0, int((projected_dt - now).total_seconds())),
+                "isProjected": True,
+                "dayLabel": day_label,
+                "actionLabel": f"Next eligible post in {found_community.get('name', 'community')}",
+            })
+            added_this_round = True
+
+        slot += 1
+        if not added_this_round:
+            # All profiles capped for current day - jump to next day boundary
+            projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
+            next_day_start = datetime.combine(projected_dt.date() + timedelta(days=1), datetime.min.time())
+            # Add 5 seconds past midnight (matches engine reset timing)
+            next_day_start = next_day_start.replace(second=5)
+            jump_seconds = (next_day_start - now).total_seconds()
+            if jump_seconds <= 0:
+                break
+            new_slot = int(jump_seconds / step_seconds) + 1
+            if new_slot <= slot:
+                break
+            slot = new_slot
+            # Reset daily counters
+            current_day = next_day_start.date()
+            for ps2 in profile_states:
+                day_remaining[ps2["id"]] = ps2["daily_cap"]
+                day_comm_actions[ps2["id"]] = {}
+            continue
+        max_slots = int((end_boundary - now).total_seconds() / step_seconds) + limit
+        if slot > max_slots:
+            # Safety valve: don't exceed the forecast window
+            break
+
+    return items
 
 
 @app.get("/queue", response_model=List[QueueItemModel])
@@ -6548,7 +7041,7 @@ def conversation_ai_suggest(conversation_id: str, payload: ConversationAISuggest
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationModel)
 def add_message(conversation_id: str, payload: MessageCreateModel):
     message_id = str(uuid.uuid4())
-    ts = payload.timestamp or now_display_time()
+    ts = payload.timestamp or datetime.now(timezone.utc).isoformat()
     with get_db() as db:
         row = db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
         if not row:
@@ -6617,16 +7110,14 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
             )
             try:
-                # Use canonical profiles.name for activity_feed.profile.
-                act_profile = str(profile_row["name"] or row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        act_profile,
+                        str(row["profileName"] or "SYSTEM"),
                         str(row["originGroup"] or "Skool Inbox"),
                         f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
-                        now_display_time(),
+                        datetime.now(timezone.utc).isoformat(),
                         f"https://www.skool.com/chat?ch={chat_id}",
                     ),
                 )
@@ -6648,15 +7139,11 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 comment_attr = parse_json_field(raw_comment_attr, {})
                 post_url = str(comment_attr.get("postUrl") or "").strip() or "https://www.skool.com/"
                 contact_name = str(row["contactName"] or "").strip() or "contact"
-                # Use canonical profiles.name for activity_feed.profile.
-                pid = str(row.get("profileId") or "").strip()
-                pr_row = db.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone() if pid else None
-                act_profile = str(pr_row["name"]) if pr_row and pr_row.get("name") else str(row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        act_profile,
+                        str(row["profileName"] or "SYSTEM"),
                         str(row["originGroup"] or "Inbox"),
                         f"DM sent to {contact_name}",
                         ts,
@@ -6815,7 +7302,19 @@ async def automation_check_proxy(profile_id: str, request: Request):
 async def automation_test_comment(payload: TestCommentRequest, request: Request):
     engine = get_automation_engine(request)
     try:
-        return await engine.run_test_comment(profile_id=payload.profileId, community_url=payload.communityUrl, prompt=payload.prompt, api_key=payload.apiKey)
+        result = await engine.run_test_comment(profile_id=payload.profileId, community_url=payload.communityUrl, prompt=payload.prompt, api_key=payload.apiKey)
+        if result.get("success") and result.get("postUrl"):
+            with get_db() as db:
+                profile_row = db.execute("SELECT name FROM profiles WHERE id = ?", (payload.profileId,)).fetchone()
+                profile_name = (profile_row["name"] if profile_row else str(payload.profileId)).strip() or str(payload.profileId)
+                group_name = str(payload.communityUrl or "").strip() or "Test"
+                event_id = f"test-comment-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8]}"
+                db.execute(
+                    "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
+                    (event_id, profile_name, group_name, "Commented", datetime.now(timezone.utc).isoformat(), result["postUrl"]),
+                )
+                db.commit()
+        return result
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
 
