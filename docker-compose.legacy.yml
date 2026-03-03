@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: engageflow-legacy-backend
+    expose:
+      - "8000"
+    environment:
+      - TZ=Europe/London
+      - ENGAGEFLOW_DB_PATH=/app/engageflow-legacy.db
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: engageflow-legacy-frontend
+    depends_on:
+      - backend
+    environment:
+      - TZ=Europe/London
+    ports:
+      - "3002:80"
+    restart: unless-stopped
