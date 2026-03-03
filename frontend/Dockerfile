@@ -2,7 +2,6 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Railway uses repo root as build context
 COPY frontend/package*.json ./
 RUN npm ci
 
@@ -11,13 +10,15 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 
-# Remove default nginx config (prevents default "Hello world" page)
+# Remove default nginx config
 RUN rm -f /etc/nginx/conf.d/default.conf
 
-# Copy built Vite output
+# Copy built files
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Use our nginx config
+# Copy nginx config
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+EXPOSE 8080
+
+CMD ["nginx", "-g", "daemon off;"]
