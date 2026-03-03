@@ -6243,14 +6243,18 @@ def update_automation_settings(payload: AutomationSettingsModel):
 
 
 @app.get("/queue", response_model=List[QueueItemModel])
-def read_queue(profile_id: Optional[str] = None):
+def read_queue(profile_id: Optional[str] = None, limit: int = 30):
     query = "SELECT * FROM queue_items"
     params: List[Any] = []
     if profile_id:
         query += " WHERE profileId = ?"
         params.append(profile_id)
+    safe_limit = max(10, min(200, int(limit or 30)))
     with get_db() as db:
-        rows = db.execute(query + " ORDER BY julianday(scheduledFor) ASC, id ASC", params).fetchall()
+        rows = db.execute(
+            query + " ORDER BY julianday(scheduledFor) ASC, id ASC LIMIT ?",
+            (*params, safe_limit),
+        ).fetchall()
     ordered_rows = [dict(row) for row in rows]
     # Dashboard readability: interleave queue by profile while preserving
     # per-profile scheduled order to reflect round-robin intent.
@@ -6403,15 +6407,19 @@ def clear_logs():
 
 
 @app.get("/activity", response_model=List[ActivityEntryModel])
-def read_activity(profile: Optional[str] = None):
+def read_activity(profile: Optional[str] = None, limit: int = 100):
     # Show timeline only for currently active profiles.
     query = "SELECT * FROM activity_feed WHERE profile IN (SELECT name FROM profiles)"
     params: List[Any] = []
     if profile:
         query += " AND profile = ?"
         params.append(profile)
+    safe_limit = max(10, min(500, int(limit or 100)))
     with get_db() as db:
-        rows = db.execute(query + " ORDER BY rowid DESC", params).fetchall()
+        rows = db.execute(
+            query + " ORDER BY rowid DESC LIMIT ?",
+            (*params, safe_limit),
+        ).fetchall()
     return [ActivityEntryModel(**dict(row)) for row in rows]
 
 

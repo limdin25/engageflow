@@ -72,11 +72,16 @@ The system is considered healthy when:
 4. Log buffering: locked-DB log writes buffered and flushed after sync cycle.
 5. **8 surgical audit fixes (dev branch):** (1) deadlock prevention in finally block, (2) log buffer ts key, (3) Buffered not Skipped message, (4) profile_for_feed UUID→SYSTEM fallback, (6) backfill profile resolution from DB, (7) docker-compose.dev volume for live reload, (8) requeue prepend for log order.
 
+## Recent Fixes (2026-03-03 cont.)
+
+6. **Queue/activity dashboard fixes [TD-124]:** read_queue limit=30, read_activity limit=100, engine UTC timestamps. TDD tests in backend/tests/.
+
 ## Next Actions (max 10)
 
 1. Verify profile rotation with 2+ profiles in production.
 2. Verify activity timeline shows rows for all active profiles.
-3. —
+3. Deploy queue/activity fixes to dev (git push origin dev, docker compose up -d --build).
+4. —
 4. —
 5. —
 6. —

@@ -158,3 +158,26 @@ Verification: Sync lock releases; buffered logs show creation ts; Buffered messa
 Reversal: `git revert <commit> --no-edit`
 ReversalTested: No
 Risk Level: MEDIUM (DB, sync lock)
+
+---
+
+## Entry #6
+
+Date: 2026-03-03
+Change: Deploy queue/activity fixes via TDD [TD-124] — queue limit=30, activity limit=100, engine UTC timestamps
+Files:
+
+- backend/app.py (read_queue limit, read_activity limit)
+- backend/automation/engine.py (datetime.now(timezone.utc).isoformat())
+- backend/tests/test_queue_limit.py
+- backend/tests/test_activity_timeline.py
+- backend/tests/unit/test_engine_utc.py
+- backend/tests/helpers.py
+- backend/tests/conftest.py
+- backend/requirements.txt (pytest, httpx)
+
+Tests: pytest backend/tests/ -v (5 passed), pytest backend/tests/unit/ -v --maxfail=1 (1 passed)
+Verification: GET /queue returns ≤30, GET /activity returns ≤100, activity timestamps UTC
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
