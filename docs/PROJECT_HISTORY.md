@@ -387,7 +387,7 @@ Date: 2026-03-04
 Change: Audited autonomy level. Secrets added. Workflow "Link project" step failed (railway link). Backend 502. Updated PROJECT_STATE.md with autonomy table.
 Files: docs/PROJECT_STATE.md
 Tests: None
-Verification: Check Actions run logs; fix railway link command if needed.
+Verification: Fixed railway link (use --project flag), railway variable set (singular). Pushed 840bdf2.
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW

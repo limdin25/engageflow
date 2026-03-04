@@ -184,7 +184,7 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 | Component | Status | Access |
 |-----------|--------|--------|
 | GitHub Secrets | ✅ | RAILWAY_TOKEN, RAILWAY_TOKEN_PROD, RAILWAY_PROJECT_ID |
-| Workflow | ⚠️ | Runs on push; "Link project" step failed (check Actions logs) |
+| Workflow | 🔄 | Fixed: railway link --project, railway variable set. Re-run on push. |
 | Railway backend | ❌ 502 | engageflow-dev not responding |
 | /debug/logs | — | Unreachable while backend 502 |
 
