@@ -18,6 +18,7 @@ On every task, before any code change:
 4) After every meaningful change:
    - Update PROJECT_STATE.md (current truth only).
    - Append to PROJECT_HISTORY.md.
+   - Commit and push to origin dev. GitHub dev = source of truth; Railway DEV auto-deploys from dev branch.
 
 ---
 
@@ -98,6 +99,7 @@ Complete only when:
 - No silent failure paths remain.
 - PROJECT_STATE.md updated.
 - PROJECT_HISTORY.md appended.
+- Pushed to origin dev (GitHub + Railway DEV deploy).
 
 ## 10) Codebox Rule
 
