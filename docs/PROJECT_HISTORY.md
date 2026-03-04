@@ -43,7 +43,8 @@ Files:
 
 Tests: None
 Verification: Confirm docs exist
-Reversal: `rm -rf docs/`
+Reversal: IRREVERSIBLE — deletes all governance docs with no local recovery.
+Mitigation: GitHub retains history. To restore: git checkout <commit> -- docs/
 ReversalTested: No
 Risk Level: LOW
 
@@ -76,7 +77,9 @@ Files:
 
 Tests: None
 Verification: Repo accessible, main branch pushed
-Reversal: `git remote remove origin`
+Reversal: IRREVERSIBLE — remote push to GitHub cannot be undone via CLI.
+git remote remove origin only disconnects local remote; GitHub repo retains all history.
+Mitigation: repo deletion requires manual GitHub admin action.
 ReversalTested: No
 Risk Level: LOW
 
@@ -155,7 +158,7 @@ Files:
 Tests: None (manual verification)
 Verification: Sync lock releases; buffered logs show creation ts; Buffered message; activity_feed edge cases; backfill resolves profile; dev volume mount; log order preserved.
 
-Reversal: `git revert <commit> --no-edit`
+Reversal: `git revert ea52715 --no-edit`
 ReversalTested: No
 Risk Level: MEDIUM (DB, sync lock)
 
@@ -322,5 +325,26 @@ Files: docs/DISCIPLINE.md
 Tests: None
 Verification: Section 0 item 4 and Section 9 now require push to origin dev.
 Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
+
+---
+
+## Entry #16 — Governance correction: MD audit fixes
+
+Date: 2026-03-04
+Change: Fix 5 governance errors found in audit:
+  (1) PROJECT_STATE.md default branch label corrected to dev
+  (2) Duplicate Next Actions item #4 renumbered
+  (3) Railway Frontend/Backend URLs split and labelled in GitHub section
+  (4) PROJECT_HISTORY.md Entry #1 rm -rf reversal replaced with IRREVERSIBLE
+  (5) Entry #3 git remote remove origin marked IRREVERSIBLE
+  (6) Entry #5 unfilled SHA resolved (ea52715)
+Files:
+  - docs/PROJECT_STATE.md
+  - docs/PROJECT_HISTORY.md
+Tests: None (docs only)
+Verification: git diff HEAD~1 docs/ matches only lines above
+Reversal: `git revert HEAD --no-edit && git push origin dev`
 ReversalTested: No
 Risk Level: LOW

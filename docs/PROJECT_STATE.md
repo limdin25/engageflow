@@ -9,8 +9,13 @@ Automation platform for engagement workflows: backend API + automation engine, f
 ## GitHub
 
 - Repo: https://github.com/limdin25/engageflow
-- Default branch: main
+- Railway DEV Frontend: https://selfless-renewal-dev.up.railway.app
+- Railway DEV Backend:  https://engageflow-dev.up.railway.app
+- Railway PROD: https://selfless-renewal-production-9e39.up.railway.app
+- Default branch: dev  ← active engineering branch (GitHub repo default = main)
 - PR #1 (audit fixes): fix/profile-rotation-auth-timing-activity-feed
+
+NOTE: Frontend and backend are separate Railway services. Do not conflate URLs.
 
 ## System Status
 
@@ -177,7 +182,6 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 1. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 2. Verify profile rotation with 2+ profiles in production.
 3. Verify activity timeline shows rows for all active profiles.
-4. —
 4. —
 5. —
 6. —
