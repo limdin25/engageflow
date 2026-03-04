@@ -90,6 +90,26 @@ function updateProfileState(profileId, fields) {
 const activeRunners = new Map();
 let lastFetchResults = {};
 
+// ==================== PUSH COOKIES TO ENGAGEFLOW (Railway only) ====================
+/** Push cookie_json to EngageFlow DB so sync can populate other Joiner instances. Never logs cookie contents. */
+async function pushCookiesToEngageFlow(profileId, cookieJson) {
+  const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
+  const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
+  if (!baseUrl || !secret || !cookieJson) return;
+  try {
+    const res = await fetch(`${baseUrl}/internal/joiner/profiles/${profileId}/cookie`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-JOINER-SECRET': secret },
+      body: JSON.stringify({ cookie_json: cookieJson }),
+    });
+    if (res.ok) {
+      console.log('[cookie-push] Pushed cookies to EngageFlow for profile', profileId);
+    }
+  } catch (e) {
+    console.warn('[cookie-push] Failed to push to EngageFlow:', e.message);
+  }
+}
+
 // ==================== COOKIE SYNC (Railway only) ====================
 async function syncCookiesFromEngageFlow() {
   const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
@@ -298,10 +318,10 @@ app.post('/api/profiles/:id/paste-cookies', async (req, res) => {
   const now = new Date().toISOString();
 
   if (result.valid) {
-    // Write cookies to EngageFlow's shared profiles table
     engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(cookieJson, req.params.id);
     updateProfileState(req.params.id, { last_login_at: now, last_action_at: now, auth_error: null });
     writeLog(req.params.id, 'info', 'cookie_paste', null, 'Cookie paste successful — authenticated');
+    pushCookiesToEngageFlow(req.params.id, cookieJson).catch(() => {});
     res.json({ success: true, message: 'Cookies validated and stored' });
   } else {
     writeLog(req.params.id, 'error', 'cookie_paste_failed', null, `Cookie validation failed: ${result.error}`);
@@ -341,10 +361,10 @@ async function connectProfile(profileId, email, password, proxy) {
   const now = new Date().toISOString();
 
   if (result.success) {
-    // Write cookies to EngageFlow's shared profiles table
     engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(result.cookieJson, profileId);
     updateProfileState(profileId, { last_login_at: now, last_action_at: now, auth_error: null, password_plain: password });
     writeLog(profileId, 'info', 'login_success', null, 'Login successful — cookies stored');
+    pushCookiesToEngageFlow(profileId, result.cookieJson).catch(() => {});
   } else {
     updateProfileState(profileId, { auth_error: result.message, last_action_at: now });
     writeLog(profileId, 'error', 'login_failed', null, `Login failed: ${result.message}`);

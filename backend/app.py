@@ -450,6 +450,25 @@ def internal_joiner_profile_cookie(profile_id: str, request: Request):
     return {"cookie_json": cookie_json}
 
 
+@app.put("/internal/joiner/profiles/{profile_id}/cookie")
+def internal_joiner_profile_cookie_put(profile_id: str, request: Request, body: dict = Body(default={})):
+    """Internal: store cookie_json from Joiner Connect/paste. Requires X-JOINER-SECRET. Never logs cookie contents."""
+    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
+    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
+    if not expected or secret != expected:
+        raise HTTPException(401, "Unauthorized")
+    cookie_json = (body.get("cookie_json") or "").strip() or None
+    with get_db() as db:
+        exists = db.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not exists:
+            raise HTTPException(404, "Profile not found")
+        db.execute("UPDATE profiles SET cookie_json = ? WHERE id = ?", (cookie_json or "", profile_id))
+        db.commit()
+    has_cookie = cookie_json is not None and len(cookie_json) > 0
+    LOGGER.info("internal/joiner/cookie PUT profile_id=%s has_cookie=%s", profile_id, has_cookie)
+    return {"ok": True}
+
+
 @app.get("/health")
 async def health(request: Request):
     """Health check: status=ok, running=engine.is_running."""
