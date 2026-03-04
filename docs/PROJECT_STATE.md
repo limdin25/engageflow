@@ -44,6 +44,8 @@ Frontend: React, Vite, React Query, TanStack Router.
 
 **Request correlation:** Every request gets a short `request_id` (8-char UUID prefix). Response headers: `X-Request-Id`, `X-EngageFlow-Git-Sha`. Automation control JSON includes `request_id`. On error, frontend toast shows `(request_id: xxx)` so Railway logs can be traced in &lt;1 min.
 
+**Stop never 500:** POST /api/automation/stop always returns 200. Response: `{ ok, success, isRunning, status, error?, request_id }`. On engine failure (CancelledError, Exception), returns 200 with `ok: false` and `error`. Stop failures appended to in-memory `recent_errors` (exposed in /api/diagnostics).
+
 ## How To Run
 
 **Docker (recommended):**

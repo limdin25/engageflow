@@ -546,3 +546,20 @@ Verification: curl -i POST /automation/stop → X-Request-Id header, request_id 
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #29 — Stop never 500 (idempotent, always 200)
+
+Date: 2026-03-04
+Change: POST /api/automation/stop must never return 500. Catch CancelledError and Exception; return 200 with ok/status/error/request_id. On engine.stop() failure: return 200 with ok:false, error message. Append stop failures to in-memory _RECENT_ERRORS (max 50); diagnostics merges with log-based recent_errors. Response shape: ok, success, isRunning, state, runState, error?, request_id.
+Files:
+- backend/app.py (_idempotent_stopped_response + ok, _stop_error_response, automation_stop never raises, _RECENT_ERRORS, diagnostics merge)
+- backend/tests/test_automation_stop_runtime.py (test_stop_api_prefixed_never_500, test_stop_api_prefixed_never_500_when_engine_raises_cancelled, test_stop_api_prefixed_never_500_when_engine_raises_runtime_error, test_stop_api_prefixed_idempotent)
+- docs/PROJECT_STATE.md, docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (49 passed)
+Verification: POST /api/automation/stop → 200 always; /api/diagnostics recent_errors includes stop failures
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

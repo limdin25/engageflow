@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
@@ -67,6 +68,7 @@ LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
 LOG_DIR = Path(os.environ.get("ENGAGEFLOW_LOG_DIR", str(Path(__file__).parent / "logs")))
+_RECENT_ERRORS: deque = deque(maxlen=50)
 SKOOL_CHAT_IMPORT_PREFIX = "skool-chat-"
 SKOOL_CHAT_IMPORT_MESSAGE_PREFIX = "skool-msg-"
 SKOOL_CHAT_BACKGROUND_SYNC_ENABLED = str(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_ENABLED", "1" if ENGAGEFLOW_AUTOMATION_ENABLED else "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -498,12 +500,15 @@ async def api_diagnostics(request: Request):
         errors.append(f"db_status: {e!s}")
         result["database_status"] = {"error": str(e)}
     try:
+        mem_errors = list(_RECENT_ERRORS)
         log_path = LOG_DIR / "engageflow.log"
         if log_path.exists():
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
             err_lines = [l.strip() for l in all_lines[-50:] if l and ("ERROR" in l or "Exception" in l or "Traceback" in l)]
-            result["recent_errors"] = err_lines[-10:]
+            result["recent_errors"] = mem_errors[-5:] + err_lines[-10:]
+        else:
+            result["recent_errors"] = mem_errors[-10:]
     except Exception as e:
         errors.append(f"log_read: {e!s}")
     if errors:
@@ -7027,11 +7032,31 @@ async def automation_start(payload: AutomationStartRequest, request: Request):
 def _idempotent_stopped_response() -> Dict[str, Any]:
     """Return standard stopped status when engine not ready or already stopped."""
     return {
+        "ok": True,
         "success": True,
         "isRunning": False,
         "isPaused": False,
         "state": "idle",
         "runState": "idle",
+        "countdownSeconds": 0,
+        "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
+        "currentProfileIndex": 0,
+        "profiles": [],
+        "stats": {},
+        "activity": [],
+    }
+
+
+def _stop_error_response(error_msg: str) -> Dict[str, Any]:
+    """Return 200-safe stopped status with ok=false when stop fails."""
+    return {
+        "ok": False,
+        "success": True,
+        "isRunning": False,
+        "isPaused": False,
+        "state": "idle",
+        "runState": "idle",
+        "error": error_msg,
         "countdownSeconds": 0,
         "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
         "currentProfileIndex": 0,
@@ -7060,22 +7085,26 @@ async def automation_stop_get(request: Request):
 @app.post("/automation/stop")
 @app.post("/api/automation/stop")
 async def automation_stop(request: Request):
+    """Stop automation. Never returns 500; always 200 with ok/status/request_id."""
     engine = getattr(request.app.state, "automation_engine", None)
     if engine is None:
         return _with_request_id(request, _idempotent_stopped_response())
     try:
-        return _with_request_id(request, await engine.stop())
+        status = await engine.stop()
+        return _with_request_id(request, {**(status or {}), "ok": True})
     except asyncio.CancelledError:
-        raise
+        return _with_request_id(request, _idempotent_stopped_response())
     except Exception as exc:
         LOGGER.exception("Automation stop failed: %s", exc)
         try:
             status = await engine.get_status()
             if not bool((status or {}).get("isRunning")):
-                return _with_request_id(request, status)
+                return _with_request_id(request, {**(status or {}), "ok": True})
         except Exception:
             pass
-        raise HTTPException(503, f"Stop failed: {exc!s}")
+        err_msg = f"Stop failed: {exc!s}"
+        _RECENT_ERRORS.append(f"[stop] {datetime.now(timezone.utc).isoformat()} {err_msg}")
+        return _with_request_id(request, _stop_error_response(err_msg))
 
 
 @app.post("/automation/pause")
