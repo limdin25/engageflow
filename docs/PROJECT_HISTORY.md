@@ -391,3 +391,16 @@ Verification: Fixed railway link (use --project flag), railway variable set (sin
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #20 — Railway access: Cursor autonomy fix
+
+Date: 2026-03-04
+Change: Cursor can access Railway after one-time `railway login`. Added scripts/railway-info.sh, docs/RAILWAY_ACCESS.md. Workflow: split link (RAILWAY_API_TOKEN) and variable set (RAILWAY_TOKEN). Add RAILWAY_API_TOKEN to GitHub Secrets for CI.
+Files: .github/workflows/railway.yml, scripts/railway-info.sh, docs/RAILWAY_ACCESS.md, docs/SECRETS_SETUP.md, docs/PROJECT_STATE.md, .gitignore
+Tests: None
+Verification: Run `railway login` then `./scripts/railway-info.sh`. Add RAILWAY_API_TOKEN for workflow.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
