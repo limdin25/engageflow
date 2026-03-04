@@ -468,6 +468,7 @@ async def api_diagnostics(request: Request):
         "git_sha": _BUILD_INFO["git_sha"],
         "build_time_utc": _BUILD_INFO["build_time_utc"],
         "service_name": _BUILD_INFO["service_name"],
+        "db_master_enabled": None,
         "system_health": {"status": "unknown", "running": False},
         "database_status": None,
         "automation_engine_state": {"running": False, "current_task": None, "next_wakeup": None},
@@ -502,6 +503,7 @@ async def api_diagnostics(request: Request):
     try:
         with get_db() as db:
             settings = _load_or_create_automation_settings(db)
+            result["db_master_enabled"] = settings.masterEnabled
             result["environment_flags"]["db_master_enabled"] = settings.masterEnabled
     except Exception:
         pass

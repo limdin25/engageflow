@@ -580,3 +580,21 @@ Verification: Stop → masterEnabled=false in DB; restart → no auto-start; Sta
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #31 — Remove redundant Railway workflow + diagnostics db_master_enabled
+
+Date: 2026-03-04
+Change: Removed .github/workflows/railway.yml (Railway native GitHub integration already auto-deploys dev→DEV and main→production; workflow was failing with Unauthorized). Added db_master_enabled at root of /api/diagnostics for no-terminal verification that Stop persists across container restarts.
+Files:
+- .github/workflows/railway.yml (deleted)
+- backend/app.py (diagnostics db_master_enabled at root)
+- backend/tests/test_diagnostics_master_enabled.py (new)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (55 passed)
+Verification: Push to dev triggers Railway auto-deploy; curl /api/diagnostics shows git_sha and db_master_enabled; Stop sets db_master_enabled=false, persists after Railway container restart
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
