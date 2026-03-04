@@ -2,11 +2,9 @@
 
 ## Pre-requisite: Deploy Status
 
-**Current live state (as of verification):**
-- EngageFlow `/internal/joiner/profiles/{id}/cookie` → **404** (endpoint not deployed; commit 4ff2a32 not live)
-- Joiner `/api/profiles` → still returns `cookie_json` (commit 9baef8c not live; should return `has_cookie_json` only)
-
-**Action required:** Redeploy both services from `dev` branch (commits 4ff2a32 + 9baef8c) after setting env vars.
+**Current live state (verified):**
+- EngageFlow `/internal/joiner/profiles/{id}/cookie` → **401** (endpoint live; SHA bcc0e73)
+- Joiner `/api/profiles` → returns `has_cookie_json` ✓
 
 ---
 
@@ -51,9 +49,9 @@ curl -sS -H "X-JOINER-SECRET: $ENGAGEFLOW_JOINER_SECRET" https://engageflow-dev.
 
 | Test | Expected | Actual |
 |------|----------|--------|
-| A) No header | 401 | *(run after redeploy)* |
-| B) Wrong secret | 401 | *(run after redeploy)* |
-| C) Correct secret | 200 | *(run after redeploy)* |
+| A) No header | 401 | 401 ✓ |
+| B) Wrong secret | 401 | 401 ✓ |
+| C) Correct secret | 200 | *(run with $ENGAGEFLOW_JOINER_SECRET)* |
 
 ---
 

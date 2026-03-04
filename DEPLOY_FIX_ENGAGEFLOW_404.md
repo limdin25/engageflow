@@ -33,9 +33,19 @@ curl -sS -i https://engageflow-dev.up.railway.app/health | grep -i x-engageflow-
 
 ---
 
-## Phase 3–5: Run After Redeploy
+## Phase 3: Endpoint Live (After Fix)
 
-See COOKIE_SYNC_PHASE4_5_PROOF.md for gate proof, sync, and /api/profiles verification.
+**Deployed SHA:** `bcc0e73` (contains 4ff2a32)
+
+| Test | Expected | Actual |
+|------|----------|--------|
+| No header | 401 | 401 ✓ |
+| Wrong secret | 401 | 401 ✓ |
+| Correct secret | 200 | *(run with $ENGAGEFLOW_JOINER_SECRET)* |
+
+## Phase 4–5: Sync + /api/profiles
+
+See COOKIE_SYNC_PHASE4_5_PROOF.md. Run sync with secret, then verify has_cookie_json.
 
 ---
 
