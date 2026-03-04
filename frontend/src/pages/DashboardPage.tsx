@@ -111,19 +111,74 @@ function StatCard({ icon: Icon, label, value, sub, color }: { icon: any; label: 
   );
 }
 
-const isMaskedOpenAiKey = (value: string) => value.includes("*") || value.includes("...") || value.includes("вЂ¦");
+const isMaskedOpenAiKey = (value: string) => value.includes("*") || value.includes("...") || value.includes("…");
 
 function formatRelativeTime(raw: string) {
   const ts = parseServerTimestamp(String(raw || ""));
   if (!Number.isFinite(ts)) return String(raw || "").trim() || "just now";
-  const deltaSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  
+  const now = Date.now();
+  const deltaSec = Math.max(0, Math.floor((now - ts) / 1000));
+  
+  // Less than 1 minute
   if (deltaSec < 60) return "just now";
+  
+  // Less than 1 hour - show minutes
   const min = Math.floor(deltaSec / 60);
   if (min < 60) return `${min} min ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} hr ago`;
-  const days = Math.floor(hr / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  
+  // Format the timestamp date
+  const date = new Date(ts);
+  const nowDate = new Date(now);
+  
+  // Check if today
+  const isToday = date.getDate() === nowDate.getDate() &&
+                  date.getMonth() === nowDate.getMonth() &&
+                  date.getFullYear() === nowDate.getFullYear();
+  
+  if (isToday) {
+    // Show time for today
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    return `${hours}:${minutes}`;
+  }
+  
+  // Check if yesterday
+  const yesterday = new Date(now - 24 * 60 * 60 * 1000);
+  const isYesterday = date.getDate() === yesterday.getDate() &&
+                      date.getMonth() === yesterday.getMonth() &&
+                      date.getFullYear() === yesterday.getFullYear();
+  
+  if (isYesterday) {
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    return `Yesterday ${hours}:${minutes}`;
+  }
+  
+  // Check if within last 7 days
+  const daysDiff = Math.floor((now - ts) / (24 * 60 * 60 * 1000));
+  if (daysDiff < 7) {
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const dayName = dayNames[date.getDay()];
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    return `${dayName} ${hours}:${minutes}`;
+  }
+  
+  // Older than 7 days - show date
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const month = monthNames[date.getMonth()];
+  const day = date.getDate();
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  
+  // If same year, omit year
+  if (date.getFullYear() === nowDate.getFullYear()) {
+    return `${month} ${day}, ${hours}:${minutes}`;
+  }
+  
+  // Different year - include year
+  return `${month} ${day} ${date.getFullYear()}, ${hours}:${minutes}`;
 }
 
 function prettifyGroupName(rawGroupName: string, postUrl: string) {
@@ -628,7 +683,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <StatCard icon={Users} label="Active Profiles" value={activeProfiles} sub={`${profiles.length} total В· Cap: ${settings?.globalDailyCapPerAccount ?? "-"}/day`} color="bg-primary/10 text-primary" />
+        <StatCard icon={Users} label="Active Profiles" value={activeProfiles} sub={`${profiles.length} total · Cap: ${settings?.globalDailyCapPerAccount ?? "-"}/day`} color="bg-primary/10 text-primary" />
         <StatCard icon={MessageSquare} label="Messages" value={messagesCount} sub={`${conversations.length} conversations`} color="bg-success/10 text-success" />
         <StatCard icon={Sparkles} label="Keyword Matches" value={keywordMatches} sub={`${visibleQueue.length} queued actions`} color="bg-warning/10 text-warning" />
         <div className="bg-card border border-border rounded-xl p-5 animate-count-up">
@@ -671,7 +726,7 @@ export default function DashboardPage() {
           ) : !connectionRest?.active && isEngineRunning && displayActiveTask ? (
             <>
               <p className="text-xs text-muted-foreground mt-1">
-                {displayActiveTask.profile} В· <span className="text-primary font-medium">{displayActiveTask.stage}</span>
+                {displayActiveTask.profile} · <span className="text-primary font-medium">{displayActiveTask.stage}</span>
               </p>
               <div className="mt-2 flex items-center gap-2">
                 <button onClick={() => setShowNextActions(true)} className="text-xs text-primary hover:text-primary/80 font-medium transition-colors inline-flex items-center gap-1">
@@ -682,7 +737,7 @@ export default function DashboardPage() {
           ) : !connectionRest?.active && isEngineRunning && nextQueueItem ? (
             <>
               <p className="text-xs text-muted-foreground mt-1">
-                {nextQueueItem.profile} &gt; {nextQueueItem.community} В· <span className="text-primary font-medium">{nextQueueItem.keyword}</span>
+                {nextQueueItem.profile} &gt; {nextQueueItem.community} · <span className="text-primary font-medium">{nextQueueItem.keyword}</span>
               </p>
               {recentRequeueTask && (
                 <p className="text-[11px] text-warning mt-1">
@@ -774,7 +829,7 @@ export default function DashboardPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-foreground">
                     <span className="font-medium">{item.profile}</span>
-                    <span className="text-muted-foreground"> В· {prettifyGroupName(item.groupName, item.postUrl)}</span>
+                    <span className="text-muted-foreground"> · {prettifyGroupName(item.groupName, item.postUrl)}</span>
                   </p>
                   <p className="text-sm text-muted-foreground truncate">{item.action}</p>
                 </div>
@@ -847,9 +902,9 @@ export default function DashboardPage() {
               <div key={item.id} className={`px-5 py-3.5 ${queueExpanded ? "flex items-start" : "flex items-center gap-4"}`}>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-foreground">{item.profile}</p>
-                  <p className="text-xs text-muted-foreground">{item.community} В· <span className="text-primary">{item.keyword}</span></p>
+                  <p className="text-xs text-muted-foreground">{item.community} · <span className="text-primary">{item.keyword}</span></p>
                   {queueExpanded && (
-                    <p className="text-[11px] text-muted-foreground mt-0.5">Post: {item.postId} В· Priority: {item.priorityScore}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">Post: {item.postId} · Priority: {item.priorityScore}</p>
                   )}
                 </div>
                 {!queueExpanded && (
