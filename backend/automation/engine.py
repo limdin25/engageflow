@@ -3739,7 +3739,8 @@ class AutomationEngine:
             return 1
 
     def _get_next_scheduled_for_from_queue(self) -> Tuple[Optional[str], int]:
-        """Return (scheduled_for_iso, seconds_until) for earliest future queue item. (None, 0) if none."""
+        """Return (scheduled_for_iso, seconds_until) for earliest future queue item. (None, 0) if none.
+        Uses julianday() for robust datetime comparison across formats (T vs space, Z vs +00:00)."""
         try:
             now_dt = datetime.now(timezone.utc)
             now_iso = now_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -3747,8 +3748,8 @@ class AutomationEngine:
                 row = db.execute(
                     """
                     SELECT id, profileId, scheduledFor FROM queue_items
-                    WHERE scheduledFor > ?
-                    ORDER BY scheduledFor ASC
+                    WHERE julianday(scheduledFor) > julianday(?)
+                    ORDER BY julianday(scheduledFor) ASC, id ASC
                     LIMIT 1
                     """,
                     (now_iso,),

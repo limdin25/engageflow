@@ -573,7 +573,7 @@ async def api_diagnostics(request: Request):
                 now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
                 with get_db() as db:
                     row = db.execute(
-                        "SELECT id, scheduledFor FROM queue_items WHERE scheduledFor > ? ORDER BY scheduledFor ASC LIMIT 1",
+                        "SELECT id, scheduledFor FROM queue_items WHERE julianday(scheduledFor) > julianday(?) ORDER BY julianday(scheduledFor) ASC, id ASC LIMIT 1",
                         (now_iso,),
                     ).fetchone()
                     if row:

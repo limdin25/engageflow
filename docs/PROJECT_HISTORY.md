@@ -725,3 +725,23 @@ Verification: Start automation, refresh UI multiple times; countdown continues c
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #39 — Scheduler julianday() fix (countdown reset root cause)
+
+Date: 2026-03-04
+Change: SQLite string comparison (scheduledFor > ?) failed when queue used space format ("2026-03-04 12:05:00") — " " < "T" at position 10 excluded valid future items. _get_next_scheduled_for_from_queue returned (None, 0), so nextScheduledFor was never set and countdown fell back to scheduler-loop value (5 min). Fix: use julianday(scheduledFor) > julianday(?) for robust datetime comparison across formats.
+Files:
+- backend/automation/engine.py (_get_next_scheduled_for_from_queue: julianday WHERE and ORDER BY)
+- backend/app.py (diagnostics scheduler_truth_packet: same julianday query)
+- backend/tests/test_scheduler_julianday.py (new)
+- docs/PROJECT_STATE.md
+- docs/PROJECT_HISTORY.md
+
+Reason: Countdown reset to 5 min on refresh. Entry #37–38 added nextScheduledFor from queue, but backend query returned no rows when scheduledFor used space or non-Z format. Julianday handles all ISO-like formats.
+Tests: pytest backend/tests -q (69 passed)
+Verification: curl /api/diagnostics shows next_action_id when queue has future items; countdown persists across refresh
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
