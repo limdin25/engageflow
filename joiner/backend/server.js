@@ -94,9 +94,9 @@ let lastFetchResults = {};
 async function syncCookiesFromEngageFlow() {
   const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
   const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
-  if (!baseUrl || !secret) return { synced: 0, skipped: 'missing env' };
+  if (!baseUrl || !secret) return { scanned: 0, updated: 0, skipped: 'missing env' };
   const profiles = engageflowDb.prepare('SELECT id, cookie_json FROM profiles').all();
-  if (profiles.length === 0) return { synced: 0, skipped: 'no profiles' };
+  if (profiles.length === 0) return { scanned: 0, updated: 0, skipped: 'no profiles' };
   const CONCURRENCY = 3;
   const TIMEOUT_MS = 10000;
   let synced = 0;
@@ -146,7 +146,7 @@ async function syncCookiesFromEngageFlow() {
     synced += results.filter(r => r.updated).length;
   }
   if (synced > 0) console.log('[cookie-sync] Synced cookies for', synced, 'profile(s) from EngageFlow');
-  return { synced };
+  return { scanned: profiles.length, updated: synced };
 }
 
 // ==================== ROOT / HEALTH ====================
