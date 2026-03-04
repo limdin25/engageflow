@@ -196,6 +196,25 @@ app.post('/internal/joiner/sync-cookies', async (req, res) => {
   }
 });
 
+// ==================== INTERNAL DEBUG DB-INFO (secret-gated) ====================
+const { buildDbInfo } = require('./db-info');
+app.get('/internal/joiner/debug/db-info', (req, res) => {
+  const secret = (req.headers['x-joiner-secret'] || '').trim();
+  const expected = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET || '';
+  if (!expected || secret !== expected) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const info = buildDbInfo({
+      engageflowPath: config.ENGAGEFLOW_DB_PATH,
+      engageflowDb,
+    });
+    res.json(info);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
 // ==================== DEBUG (Railway-only, ENGAGEFLOW_DEBUG=1) ====================
 if (process.env.ENGAGEFLOW_DEBUG === '1') {
   app.get('/debug/routes', (req, res) => {
@@ -248,6 +267,7 @@ app.get('/api/profiles', (req, res) => {
   `).all();
 
   // Enrich with joiner-specific state + queue stats
+  // Validation: profile cannot be "ready" if cookie_json is empty (expose as paused)
   const result = profiles.map(p => {
     const state = joinerDb.prepare('SELECT * FROM joiner_profile_state WHERE profile_id = ?').get(p.id) || {};
     const queueTotal = joinerDb.prepare('SELECT COUNT(*) as c FROM join_queue WHERE profile_id = ?').get(p.id)?.c || 0;
@@ -255,9 +275,11 @@ app.get('/api/profiles', (req, res) => {
     const hasCookies = !!(p.cookie_json && String(p.cookie_json).trim());
     const authError = state.auth_error || null;
     const authStatus = hasCookies ? (authError ? 'expired' : 'connected') : 'disconnected';
+    const effectiveStatus = (p.status === 'ready' && !hasCookies) ? 'paused' : (p.status || 'paused');
     const { cookie_json, ...rest } = p;
     return {
       ...rest,
+      status: effectiveStatus,
       auth_status: authStatus,
       auth_error: authError,
       daily_count: state.daily_count || 0,
@@ -294,19 +316,31 @@ app.post('/api/profiles/:id/store-password', (req, res) => {
 // Profiles are created and deleted in EngageFlow only
 
 // ==================== AUTH ====================
+const SKOOL_AUTH_REQUEST = 'GET https://api2.skool.com/self';
+
 app.get('/api/profiles/:id/skool-auth', async (req, res) => {
   const profile = engageflowDb.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
   if (!profile) return res.status(404).json({ error: 'Not found' });
-  if (!profile.cookie_json) return res.json({ valid: false, error: 'No cookies' });
+  const cookieJson = profile.cookie_json;
+  const hasCookieJson = !!(cookieJson && String(cookieJson).trim());
+  if (!hasCookieJson) {
+    const msg = `Auth failed: NO_COOKIE_JSON profile_id=${req.params.id} email=${profile.email || '(no email)'} request=${SKOOL_AUTH_REQUEST}`;
+    writeLog(req.params.id, 'error', 'test_auth', null, msg);
+    return res.json({ valid: false, error: 'No cookies', code: 'NO_COOKIE_JSON' });
+  }
 
-  const result = await validateCookies(profile.cookie_json);
+  const result = await validateCookies(cookieJson, { profileId: req.params.id, email: profile.email });
   const now = new Date().toISOString();
   if (result.valid) {
     updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth', auth_error: null });
   } else {
-    updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth_failed', auth_error: result.error });
+    const code = result.code || 'AUTH_FAILED';
+    updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth_failed', auth_error: code });
+    writeLog(req.params.id, 'error', 'test_auth', null, `Auth failed: ${code} profile_id=${req.params.id} email=${profile.email || '(no email)'} request=${SKOOL_AUTH_REQUEST}`);
   }
-  writeLog(req.params.id, result.valid ? 'info' : 'error', 'test_auth', null, result.valid ? 'Auth valid' : `Auth failed: ${result.error}`);
+  if (result.valid) {
+    writeLog(req.params.id, 'info', 'test_auth', null, 'Auth valid');
+  }
   res.json(result);
 });
 

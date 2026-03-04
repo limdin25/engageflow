@@ -109,6 +109,9 @@ Backend MUST have a Volume mounted at `/data`. Redeploy after variable changes.
 
 - **URL:** https://joiner-dev.up.railway.app
 - **Source:** Repo `limdin25/engageflow`, branch `dev`, **Root Directory:** `joiner/backend`, Dockerfile `joiner/backend/Dockerfile`.
+- **DB source of truth:** EngageFlow DB (`ENGAGEFLOW_DB_PATH`). Local: `backend/engageflow.db` (same file as EngageFlow backend). Railway: `/data/engageflow.db`. Joiner ensures `profiles.cookie_json` on startup (migration adds column if missing); fails fast if required column missing.
+- **DB debug:** `GET /internal/joiner/debug/db-info` with header `X-JOINER-SECRET`. Returns `db_kind`, `db_path` (basename), `schema_hash`, `profiles_has_cookie_json`. No secrets.
+- **Startup log:** `[db] engageflow db_kind=sqlite db_path=<basename> schema_hash=<hash>`.
 - **Deployment fingerprint:** Response header `X-Joiner-Git-Sha` (commit hash or `unknown`); set from `RAILWAY_GIT_COMMIT_SHA` / `ENGAGEFLOW_GIT_SHA`.
 - **Cookie sync:** `POST /internal/joiner/sync-cookies` with header `X-JOINER-SECRET: <ENGAGEFLOW_JOINER_SECRET>`. Returns `{ success, scanned, updated }`. Validated 2026-03-04 (200, scanned:3, updated:0).
 

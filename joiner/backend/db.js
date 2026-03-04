@@ -31,6 +31,25 @@ engageflowDb.exec(`
     );
 `);
 
+// Migration: ensure profiles.cookie_json exists (idempotent; fixes local DBs created by EngageFlow without column)
+const profileCols = engageflowDb.prepare('PRAGMA table_info(profiles)').all().map(r => r.name);
+if (!profileCols.includes('cookie_json')) {
+  engageflowDb.exec('ALTER TABLE profiles ADD COLUMN cookie_json TEXT');
+  console.log('[db] Migration: added cookie_json to profiles');
+}
+
+// Fail fast if required column missing
+const profileColsAfter = engageflowDb.prepare('PRAGMA table_info(profiles)').all().map(r => r.name);
+if (!profileColsAfter.includes('cookie_json')) {
+  throw new Error('Joiner requires profiles.cookie_json. DB schema missing required column. Refusing to start.');
+}
+
+// Startup log: db source of truth (no secrets)
+const { getSchemaInfo } = require('./db-info');
+const dbBasename = path.basename(engageflowPath);
+const { schema_hash } = getSchemaInfo(engageflowDb);
+console.log('[db] engageflow db_kind=sqlite db_path=' + dbBasename + ' schema_hash=' + schema_hash);
+
 // Railway: sync profiles from EngageFlow API when local DB is empty (async, non-blocking)
 if (process.env.RAILWAY === 'true' && config.ENGAGEFLOW_API) {
   const count = engageflowDb.prepare('SELECT COUNT(*) as c FROM profiles').get().c;

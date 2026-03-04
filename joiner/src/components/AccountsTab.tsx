@@ -228,7 +228,13 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
   const handleTestAuth = async (id: string) => {
     try {
       const result = await api.testAuth(id);
-      alert(result.valid ? '✓ Auth valid' : `✗ Auth failed: ${result.error}`);
+      if (result.valid) {
+        alert('✓ Auth valid');
+      } else if (result.code === 'COOKIE_EXPIRED') {
+        alert('✗ Cookie expired — re-export cookies from browser and paste or reconnect.');
+      } else {
+        alert(`✗ Auth failed: ${result.code || result.error}`);
+      }
       fetchProfiles();
     } catch (err: any) { alert(err.message); }
   };
@@ -412,7 +418,9 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
                             {/* Last Error */}
                             <div>
                               <span className="text-muted-foreground">Last Error</span>
-                              <p className="mt-1 font-medium text-destructive">{p.auth_error || p.last_auth_error || 'None'}</p>
+                              <p className="mt-1 font-medium text-destructive">
+                                {p.auth_error === 'COOKIE_EXPIRED' ? 'Cookie expired — re-export required' : (p.auth_error || p.last_auth_error || 'None')}
+                              </p>
                             </div>
                             {/* Queue Stats */}
                             <div>
