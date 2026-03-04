@@ -76,6 +76,15 @@ async function resolveBackendBaseUrl(path: string): Promise<string> {
   }
 
   resolveBaseInFlight = (async () => {
+    if (typeof window !== "undefined") {
+      const hostname = window.location.hostname;
+      const isLocalHost = /^(localhost|127\.0\.0\.1)$/i.test(hostname);
+      if (!isLocalHost && !ENV_BASE_URL) {
+        throw new Error(
+          "VITE_BACKEND_URL must be set when deployed. Set VITE_BACKEND_URL=https://engageflow-dev.up.railway.app in Railway Variables for the frontend service.",
+        );
+      }
+    }
     for (const candidate of getFallbackBaseCandidates()) {
       const normalized = normalizeBase(candidate);
       try {
@@ -152,7 +161,9 @@ function parseJsonSafe(text: string): unknown | null {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const primaryBase = await resolveBackendBaseUrl(path);
-  const baseCandidates = [primaryBase, ...getFallbackBaseCandidates().map(normalizeBase).filter((item) => item !== primaryBase)];
+  const baseCandidates = ENV_BASE_URL
+    ? [primaryBase]
+    : [primaryBase, ...getFallbackBaseCandidates().map(normalizeBase).filter((item) => item !== primaryBase)];
   let response: Response | null = null;
 
   for (const base of baseCandidates) {

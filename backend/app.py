@@ -382,6 +382,23 @@ async def debug_runtime(request: Request):
     }
 
 
+@app.get("/debug/scheduler")
+async def debug_scheduler(request: Request):
+    """DEV: scheduler state. Safe fallback (no get_debug_snapshot)."""
+    engine = getattr(request.app.state, "automation_engine", None)
+    if not engine:
+        return {"success": True, "running": False, "paused": False}
+    try:
+        status = await engine.get_status()
+        return {
+            "success": True,
+            "running": bool((status or {}).get("isRunning")),
+            "paused": bool((status or {}).get("isPaused")),
+        }
+    except Exception:
+        return {"success": True, "running": False, "paused": False}
+
+
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
     text = str(message or "").replace("\x00", "").strip()
     if len(text) <= max_len:
