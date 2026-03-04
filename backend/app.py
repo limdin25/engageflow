@@ -6546,15 +6546,26 @@ def get_automation_settings():
 @app.put("/automation-settings", response_model=AutomationSettingsModel)
 @app.put("/automation/settings", response_model=AutomationSettingsModel)
 def update_automation_settings(payload: AutomationSettingsModel):
-    with get_db() as db:
-        _load_or_create_automation_settings(db)
-        db.execute("DELETE FROM automation_settings WHERE key != 'default'")
-        db.execute(
-            "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (payload.model_dump_json(),),
+    try:
+        with get_db() as db:
+            _load_or_create_automation_settings(db)
+            db.execute("DELETE FROM automation_settings WHERE key != 'default'")
+            db.execute(
+                "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (payload.model_dump_json(),),
+            )
+            db.commit()
+        return payload
+    except Exception as exc:
+        LOGGER.exception("Settings update failed")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": False,
+                "error": "settings_update_failed",
+                "message": str(exc)[:200],
+            },
         )
-        db.commit()
-    return payload
 
 
 @app.get("/queue", response_model=List[QueueItemModel])
