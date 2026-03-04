@@ -563,3 +563,20 @@ Verification: POST /api/automation/stop → 200 always; /api/diagnostics recent_
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #30 — Stop persists masterEnabled; no auto-start after restart
+
+Date: 2026-03-04
+Change: Stop persists masterEnabled=False to automation_settings. Start persists masterEnabled=True. On startup, if masterEnabled=False in DB, skip auto-start and log "Auto-start suppressed by DB flag". Backward compat: when masterEnabled is absent from stored payload (legacy), treat as True.
+Files:
+- backend/app.py (_set_master_enabled_db, _load_or_create_automation_settings backward compat, lifespan check, automation_stop/start persist)
+- backend/tests/test_automation_persisted_state.py (test_stop_persists_disabled_flag, test_start_enables_flag_and_starts_engine, test_startup_does_not_autostart_when_flag_disabled)
+- docs/PROJECT_STATE.md, docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (52 passed)
+Verification: Stop → masterEnabled=false in DB; restart → no auto-start; Start → masterEnabled=true
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

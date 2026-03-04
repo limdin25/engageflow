@@ -234,14 +234,19 @@ async def lifespan(app: FastAPI):
         if not _is_db_writable():
             LOGGER.warning("ENGAGEFLOW_AUTOMATION_ENABLED=1 but DB path %s not writable; scheduler will not auto-start", DB_PATH)
         else:
-            engine = app.state.automation_engine
-            try:
-                status = await engine.get_status()
-                if not bool((status or {}).get("isRunning")):
-                    await engine.start()
-                    LOGGER.info("Automation scheduler auto-started (ENGAGEFLOW_AUTOMATION_ENABLED=1)")
-            except RuntimeError as exc:
-                LOGGER.warning("Automation auto-start skipped: %s", exc)
+            with get_db() as db:
+                settings = _load_or_create_automation_settings(db)
+                if not settings.masterEnabled:
+                    LOGGER.info("Auto-start suppressed by DB flag (masterEnabled=false)")
+            if settings.masterEnabled:
+                engine = app.state.automation_engine
+                try:
+                    status = await engine.get_status()
+                    if not bool((status or {}).get("isRunning")):
+                        await engine.start()
+                        LOGGER.info("Automation scheduler auto-started (ENGAGEFLOW_AUTOMATION_ENABLED=1)")
+                except RuntimeError as exc:
+                    LOGGER.warning("Automation auto-start skipped: %s", exc)
     app.state.profile_login_monitor_task = asyncio.create_task(
         _profile_login_monitor_loop(app),
         name="profile-login-monitor",
@@ -472,6 +477,7 @@ async def api_diagnostics(request: Request):
             "ENGAGEFLOW_AUTOMATION_ENABLED": ENGAGEFLOW_AUTOMATION_ENABLED,
             "ENGAGEFLOW_DEBUG": ENGAGEFLOW_DEBUG,
             "db_path": str(DB_PATH),
+            "db_master_enabled": None,
         },
     }
     try:
@@ -493,6 +499,12 @@ async def api_diagnostics(request: Request):
             result["system_health"] = {"status": "ok", "running": False}
     except Exception as e:
         errors.append(f"engine_access: {e!s}")
+    try:
+        with get_db() as db:
+            settings = _load_or_create_automation_settings(db)
+            result["environment_flags"]["db_master_enabled"] = settings.masterEnabled
+    except Exception:
+        pass
     try:
         result["database_status"] = _get_db_status_payload()
         result["last_activity_timestamp"] = result["database_status"].get("last_activity_timestamp")
@@ -5136,6 +5148,9 @@ def _load_or_create_automation_settings(db: sqlite3.Connection) -> AutomationSet
         if isinstance(stored_payload, dict):
             # Merge with defaults so new settings keys are added without wiping existing values.
             merged_payload = {**AUTOMATION_SETTINGS_DEFAULT.model_dump(), **stored_payload}
+            # Backward compat: if masterEnabled never persisted (legacy), treat as enabled.
+            if "masterEnabled" not in stored_payload:
+                merged_payload["masterEnabled"] = True
         else:
             merged_payload = AUTOMATION_SETTINGS_DEFAULT.model_dump()
         return AutomationSettingsModel(**merged_payload)
@@ -5144,6 +5159,19 @@ def _load_or_create_automation_settings(db: sqlite3.Connection) -> AutomationSet
         db.execute("UPDATE automation_settings SET value = ? WHERE key = 'default'", (fallback_payload,))
         db.commit()
         return AUTOMATION_SETTINGS_DEFAULT
+
+
+def _set_master_enabled_db(enabled: bool) -> None:
+    """Persist masterEnabled to automation_settings. Used by Stop (False) and Start (True)."""
+    with get_db() as db:
+        settings = _load_or_create_automation_settings(db)
+        payload = settings.model_dump()
+        payload["masterEnabled"] = enabled
+        db.execute(
+            "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (json.dumps(payload),),
+        )
+        db.commit()
 
 
 def ensure_tables() -> None:
@@ -7019,6 +7047,7 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
 @app.post("/automation/start")
 @app.post("/api/automation/start")
 async def automation_start(payload: AutomationStartRequest, request: Request):
+    _set_master_enabled_db(True)
     engine = get_automation_engine(request)
     try:
         return _with_request_id(request, await engine.start(payload.profiles, payload.globalSettings))
@@ -7085,7 +7114,8 @@ async def automation_stop_get(request: Request):
 @app.post("/automation/stop")
 @app.post("/api/automation/stop")
 async def automation_stop(request: Request):
-    """Stop automation. Never returns 500; always 200 with ok/status/request_id."""
+    """Stop automation. Never returns 500; always 200 with ok/status/request_id. Persists masterEnabled=False."""
+    _set_master_enabled_db(False)
     engine = getattr(request.app.state, "automation_engine", None)
     if engine is None:
         return _with_request_id(request, _idempotent_stopped_response())

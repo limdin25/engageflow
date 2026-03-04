@@ -46,6 +46,8 @@ Frontend: React, Vite, React Query, TanStack Router.
 
 **Stop never 500:** POST /api/automation/stop always returns 200. Response: `{ ok, success, isRunning, status, error?, request_id }`. On engine failure (CancelledError, Exception), returns 200 with `ok: false` and `error`. Stop failures appended to in-memory `recent_errors` (exposed in /api/diagnostics).
 
+**Stop persists:** Stop sets `masterEnabled=false` in automation_settings. Start sets `masterEnabled=true`. On startup, if `masterEnabled=false` in DB, auto-start is skipped (log: "Auto-start suppressed by DB flag"). Prevents "I clicked Stop and it kept running" after container restarts.
+
 ## How To Run
 
 **Docker (recommended):**
