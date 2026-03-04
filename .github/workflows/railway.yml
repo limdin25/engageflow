@@ -29,12 +29,17 @@ jobs:
       - name: Install Railway CLI
         run: npm i -g @railway/cli
 
-      - name: Link project and set variables (DEV)
+      - name: Link project (DEV)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: railway link --project $RAILWAY_PROJECT_ID -s backend
+
+      - name: Set variables (DEV)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway link --project ${{ secrets.RAILWAY_PROJECT_ID }} --service backend --json
-          railway variable set ENGAGEFLOW_DEBUG=1 --service backend
+          railway variable set ENGAGEFLOW_DEBUG=1 -s backend
           echo "Railway DEV vars updated."
 
   railway-main:
@@ -51,10 +56,15 @@ jobs:
       - name: Install Railway CLI
         run: npm i -g @railway/cli
 
-      - name: Link project and set variables (PRODUCTION)
+      - name: Link project (PRODUCTION)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: railway link --project $RAILWAY_PROJECT_ID -s backend
+
+      - name: Set variables (PRODUCTION)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
         run: |
-          railway link --project ${{ secrets.RAILWAY_PROJECT_ID }} --service backend --json
-          railway variable set ENGAGEFLOW_DEBUG=0 --service backend
+          railway variable set ENGAGEFLOW_DEBUG=0 -s backend
           echo "Railway PROD vars updated."

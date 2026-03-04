@@ -198,7 +198,7 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 
 ## Next Actions (max 10)
 
-1. Add `RAILWAY_TOKEN_PROD` to GitHub Secrets (production token for main branch).
+1. Add `RAILWAY_API_TOKEN` (account token) for workflow `railway link` step.
 2. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 2. Verify profile rotation with 2+ profiles in production.
 3. Verify activity timeline shows rows for all active profiles.
