@@ -457,3 +457,21 @@ Verification: Activity Timeline shows new rows within 5s of automation action; I
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #24 — Automation Stop: no 500 Internal server error
+
+Date: 2026-03-04
+Change: POST /automation/stop returns 200 instead of 500 when engine not ready (AttributeError from get_automation_engine). Root cause: get_automation_engine(request) raised AttributeError before route try block → global exception handler → 500 "Internal server error". Fix: use getattr(request.app.state, "automation_engine", None); if None return idempotent stopped response. TDD: backend/tests/test_automation_control.py.
+Files:
+- backend/app.py (_idempotent_stopped_response, automation_stop uses getattr)
+- backend/tests/test_automation_control.py (test_stop_returns_200_and_sets_running_false, test_stop_idempotent_when_already_stopped, test_stop_no_500_when_engine_missing)
+- docs/PROJECT_STATE.md (verification curl for stop)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests/test_automation_control.py -v (3 passed; local disk full prevented full suite)
+Verification: curl -i -X POST https://engageflow-dev.up.railway.app/automation/stop → 200, isRunning=false
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

@@ -119,6 +119,9 @@ curl -sS https://engageflow-dev.up.railway.app/debug/runtime
 
 curl -sS "https://engageflow-dev.up.railway.app/activity?limit=1"
 # PASS: newest timestamp < 5 min when actions execute
+
+curl -i -X POST https://engageflow-dev.up.railway.app/automation/stop
+# PASS: 200, JSON with isRunning=false (idempotent when already stopped)
 ```
 
 ### Railway build config (2026-03-04)

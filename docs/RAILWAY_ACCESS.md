@@ -1,5 +1,7 @@
 # Railway Access — Cursor Autonomy
 
+**Project:** efficient-ambition | **Service (backend):** engageflow | **Project ID:** `f2cddd1a-3d44-47f6-bd18-5ce566b88da4`
+
 ## Why Cursor Can't Access Railway Directly
 
 1. **RAILWAY_TOKEN (project token)** — Works in GitHub Actions for `railway variable set` / `railway up`. Does **not** work for `railway link` locally; that needs account-level auth.
@@ -8,26 +10,30 @@
 
 ## Fix: One-Time Local Login
 
-Run once in your terminal:
+Run once in your terminal (from repo root):
 
 ```bash
-cd /path/to/engageflow-repo
 railway login
 railway link --project f2cddd1a-3d44-47f6-bd18-5ce566b88da4 --service engageflow --environment DEV
 ```
 
 After that, Cursor can run:
 
-- `railway logs --service engageflow -n 50`
 - `railway status`
+- `railway logs --service engageflow` (streams; pipe to `head -N` to limit)
 - `./scripts/railway-info.sh`
 
-Credentials are cached in `~/.railway/` (or similar). Cursor's terminal uses your shell, so it inherits access.
+Credentials are cached. Cursor's terminal uses your shell, so it inherits access.
 
 ## GitHub Actions
 
-The workflow now uses:
-- **RAILWAY_API_TOKEN** — For `railway link` (account token). Create at: https://railway.app/account/tokens
-- **RAILWAY_TOKEN** / **RAILWAY_TOKEN_PROD** — For `railway variable set` (project tokens)
+The workflow (`.github/workflows/railway.yml`) uses:
+
+| Secret | Purpose |
+|--------|---------|
+| RAILWAY_API_TOKEN | `railway link` (account token). Create at: https://railway.app/account/tokens |
+| RAILWAY_TOKEN | `railway variable set` for DEV |
+| RAILWAY_TOKEN_PROD | `railway variable set` for production |
+| RAILWAY_PROJECT_ID | `f2cddd1a-3d44-47f6-bd18-5ce566b88da4` |
 
 Add `RAILWAY_API_TOKEN` to GitHub Secrets. Without it, the "Link project" step fails.

@@ -9,4 +9,4 @@ railway status 2>&1 || echo "(run: railway login && railway link --project \$RAI
 
 echo ""
 echo "=== Last 30 log lines ==="
-railway logs --service engageflow -n 30 2>&1 || echo "(railway login required)"
+railway logs --service engageflow 2>&1 | head -30 2>&1 || echo "(railway login required)"

@@ -6911,9 +6911,28 @@ async def automation_start(payload: AutomationStartRequest, request: Request):
         raise HTTPException(503, f"Start failed: {exc!s}")
 
 
+def _idempotent_stopped_response() -> Dict[str, Any]:
+    """Return standard stopped status when engine not ready or already stopped."""
+    return {
+        "success": True,
+        "isRunning": False,
+        "isPaused": False,
+        "state": "idle",
+        "runState": "idle",
+        "countdownSeconds": 0,
+        "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
+        "currentProfileIndex": 0,
+        "profiles": [],
+        "stats": {},
+        "activity": [],
+    }
+
+
 @app.post("/automation/stop")
 async def automation_stop(request: Request):
-    engine = get_automation_engine(request)
+    engine = getattr(request.app.state, "automation_engine", None)
+    if engine is None:
+        return _idempotent_stopped_response()
     try:
         return await engine.stop()
     except Exception as exc:
