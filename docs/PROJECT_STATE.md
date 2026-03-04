@@ -179,9 +179,22 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 
 ## Railway Autonomy (2026-03-04)
 
-- **Workflow:** `.github/workflows/railway.yml` — on push to dev sets `ENGAGEFLOW_DEBUG=1`; on push to main sets `ENGAGEFLOW_DEBUG=0` (production).
-- **Endpoint:** `GET /debug/logs` — last 100 log lines (gated by `ENGAGEFLOW_DEBUG=1`).
-- **Secrets:** `RAILWAY_TOKEN` (dev), `RAILWAY_TOKEN_PROD` (main), `RAILWAY_PROJECT_ID`. See `docs/SECRETS_SETUP.md`.
+**Level:** Cursor → GitHub Actions → Railway CLI. No browser for vars/logs/deploy.
+
+| Component | Status | Access |
+|-----------|--------|--------|
+| GitHub Secrets | ✅ | RAILWAY_TOKEN, RAILWAY_TOKEN_PROD, RAILWAY_PROJECT_ID |
+| Workflow | ⚠️ | Runs on push; "Link project" step failed (check Actions logs) |
+| Railway backend | ❌ 502 | engageflow-dev not responding |
+| /debug/logs | — | Unreachable while backend 502 |
+
+**What Cursor controls:**
+- Push to dev → workflow sets ENGAGEFLOW_DEBUG=1 via Railway CLI
+- Push to main → workflow sets ENGAGEFLOW_DEBUG=0 via Railway CLI
+- `/debug/logs` → last 100 lines (when backend up + ENGAGEFLOW_DEBUG=1)
+- `railway logs --service backend` (local, after `railway login`)
+
+**Workflow:** `.github/workflows/railway.yml`. **Secrets:** See `docs/SECRETS_SETUP.md`.
 
 ## Next Actions (max 10)
 
