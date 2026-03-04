@@ -311,3 +311,16 @@ Verification: Set Railway vars per PROJECT_STATE.md; curl /health, /debug/runtim
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #15 — DISCIPLINE: always push to origin dev
+
+Date: 2026-03-04
+Change: Added mandatory step: after every meaningful change, commit and push to origin dev. GitHub dev = source of truth; Railway DEV auto-deploys from dev branch.
+Files: docs/DISCIPLINE.md
+Tests: None
+Verification: Section 0 item 4 and Section 9 now require push to origin dev.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
