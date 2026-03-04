@@ -192,7 +192,7 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 - Push to dev → workflow sets ENGAGEFLOW_DEBUG=1 via Railway CLI
 - Push to main → workflow sets ENGAGEFLOW_DEBUG=0 via Railway CLI
 - `/debug/logs` → last 100 lines (when backend up + ENGAGEFLOW_DEBUG=1)
-- `railway logs --service backend` (local, after `railway login`)
+- `railway logs --service engageflow` (local, after `railway login`)
 
 **Workflow:** `.github/workflows/railway.yml`. **Secrets:** See `docs/SECRETS_SETUP.md`.
 

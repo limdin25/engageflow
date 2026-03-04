@@ -5,8 +5,8 @@ set -e
 cd "$(dirname "$0")/.."
 
 echo "=== Railway status ==="
-railway status 2>&1 || echo "(run: railway login && railway link --project \$RAILWAY_PROJECT_ID --service backend)"
+railway status 2>&1 || echo "(run: railway login && railway link --project \$RAILWAY_PROJECT_ID --service engageflow --environment DEV)"
 
 echo ""
 echo "=== Last 30 log lines ==="
-railway logs --service backend -n 30 2>&1 || echo "(railway login required)"
+railway logs --service engageflow -n 30 2>&1 || echo "(railway login required)"

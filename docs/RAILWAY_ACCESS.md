@@ -13,12 +13,12 @@ Run once in your terminal:
 ```bash
 cd /path/to/engageflow-repo
 railway login
-railway link --project f2cddd1a-3d44-47f6-bd18-5ce566b88da4 --service backend
+railway link --project f2cddd1a-3d44-47f6-bd18-5ce566b88da4 --service engageflow --environment DEV
 ```
 
 After that, Cursor can run:
 
-- `railway logs --service backend -n 50`
+- `railway logs --service engageflow -n 50`
 - `railway status`
 - `./scripts/railway-info.sh`
 

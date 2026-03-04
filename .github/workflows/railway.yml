@@ -33,13 +33,13 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-        run: railway link --project $RAILWAY_PROJECT_ID -s backend
+        run: railway link --project $RAILWAY_PROJECT_ID -s engageflow -e DEV
 
       - name: Set variables (DEV)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway variable set ENGAGEFLOW_DEBUG=1 -s backend
+          railway variable set ENGAGEFLOW_DEBUG=1 -s engageflow
           echo "Railway DEV vars updated."
 
   railway-main:
@@ -60,11 +60,11 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-        run: railway link --project $RAILWAY_PROJECT_ID -s backend
+        run: railway link --project $RAILWAY_PROJECT_ID -s engageflow -e production
 
       - name: Set variables (PRODUCTION)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
         run: |
-          railway variable set ENGAGEFLOW_DEBUG=0 -s backend
+          railway variable set ENGAGEFLOW_DEBUG=0 -s engageflow
           echo "Railway PROD vars updated."
