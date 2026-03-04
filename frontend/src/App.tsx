@@ -34,8 +34,25 @@ function RequireUnlock({ children }: { children: React.ReactNode }) {
 function GlobalErrorBridge() {
   useEffect(() => {
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-      const reason = event.reason as { message?: string } | undefined;
-      toast.error(reason?.message || "Request failed");
+      const reason = event.reason;
+      
+      // Extract error message from various error formats
+      let message = "Request failed";
+      
+      if (reason instanceof Error) {
+        message = reason.message;
+      } else if (reason?.message) {
+        message = reason.message;
+      } else if (typeof reason === "string") {
+        message = reason;
+      }
+      
+      // Don't show generic "Internal server error" - backend should provide specific messages
+      if (message === "Internal server error" || message === "Internal Server Error") {
+        message = "Request failed - please try again";
+      }
+      
+      toast.error(message);
     };
     window.addEventListener("unhandledrejection", onUnhandledRejection);
     return () => window.removeEventListener("unhandledrejection", onUnhandledRejection);
