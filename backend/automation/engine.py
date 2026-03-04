@@ -2928,23 +2928,7 @@ class AutomationEngine:
                             sent, send_reason = self._submit_comment_with_fallback(page, ai_reply)
                             if not sent:
                                 raise RuntimeError(f"send_or_dom_error:{send_reason}")
-                            if not self._verify_comment_published(page, profile, ai_reply):
-                                raise RuntimeError("send_or_dom_error:post_submit_not_verified")
-
-                            self._add_to_blacklist(post_url, blacklist, reply_source_text)
-                            self._save_blacklist(blacklist)
-                            _clear_queue_network_failure(post_url)
-
-                            replies_this_visit += 1
-                            community_actions_today += 1
-                            community["actionsToday"] = community_actions_today
-                            profile["repliesCompleted"] = profile.get("repliesCompleted", 0) + 1
-                            result.comments_posted += 1
-                            self._increment_community_action_counters(
-                                community_id=community.get("id", ""),
-                                is_keyword_match=bool(is_kw),
-                            )
-                            result.activity_rows.append({
+                            activity_row = {
                                 "id": str(uuid.uuid4()),
                                 "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                                 "profileLabel": profile_label,
@@ -2958,7 +2942,30 @@ class AutomationEngine:
                                 "postUrl": post_url,
                                 "result": "Commented",
                                 "skipReason": "",
-                            })
+                            }
+                            result.activity_rows.append(activity_row)
+                            try:
+                                self._persist_activity_rows([activity_row])
+                            except Exception as log_exc:
+                                LOGGER.warning("Failed to log activity for task=%s: %s", (task_ref or "")[:8], log_exc)
+                            if not self._verify_comment_published(page, profile, ai_reply):
+                                LOGGER.warning(
+                                    "Comment posted but verify failed task=%s (activity already logged)",
+                                    task_ref[:8] if task_ref else "n/a",
+                                )
+                            self._add_to_blacklist(post_url, blacklist, reply_source_text)
+                            self._save_blacklist(blacklist)
+                            _clear_queue_network_failure(post_url)
+
+                            replies_this_visit += 1
+                            community_actions_today += 1
+                            community["actionsToday"] = community_actions_today
+                            profile["repliesCompleted"] = profile.get("repliesCompleted", 0) + 1
+                            result.comments_posted += 1
+                            self._increment_community_action_counters(
+                                community_id=community.get("id", ""),
+                                is_keyword_match=bool(is_kw),
+                            )
                             self._emit_lifecycle("TASK_COMPLETED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="completed")
                             self._remove_queue_item(profile_id, post_url)
                             norm_post_url = self._normalize_url(post_url)

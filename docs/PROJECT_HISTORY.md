@@ -632,3 +632,21 @@ Verification: Next automation run completes tasks; activity shows new comments
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #34 — Activity logging + verify non-fatal + settings error handling
+
+Date: 2026-03-04
+Change: Fix activity not logged when comments posted. Root cause: activity_feed insert happened only after _verify_comment_published succeeded; failed verification raised and skipped logging. Moved activity append and _persist_activity_rows to immediately after _submit_comment_with_fallback returns sent=True (before verify). Made _verify_comment_published non-fatal when sent=True: log warning but continue success flow. Fixed PUT /automation/settings: wrap in try/except, return 200 with success:false on error instead of 500.
+Files:
+- backend/automation/engine.py (activity logging before verify, verify non-fatal)
+- backend/app.py (settings endpoint error handling)
+- backend/tests/test_activity_logging.py (new)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (expected: 63+ passed)
+Verification: Next automation run logs activity immediately after posting; dashboard shows recent timestamps; tasks complete as SUCCESS; no "Internal server error" toast on settings save failure
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: MEDIUM (execution layer, DB writes)
