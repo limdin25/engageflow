@@ -1,3 +1,4 @@
+# EngageFlow backend — build from repo root (Railway monorepo)
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -8,15 +9,15 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
+    && ln -snf /usr/share/zoneinfo/Europe/London /etc/localtime \
+    && echo Europe/London > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m playwright install --with-deps chromium
 
-COPY . .
+COPY backend .
 
 EXPOSE 8000
 

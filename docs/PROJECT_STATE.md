@@ -2,6 +2,8 @@
 
 Max 300 lines. Current truth only.
 
+**Docs:** DISCIPLINE.md | PROJECT_STATE.md | PROJECT_HISTORY.md | RAILWAY_ACCESS.md | SECRETS_SETUP.md
+
 ## Current Objective
 
 Automation platform for engagement workflows: backend API + automation engine, frontend dashboard.
@@ -9,13 +11,17 @@ Automation platform for engagement workflows: backend API + automation engine, f
 ## GitHub
 
 - Repo: https://github.com/limdin25/engageflow
-- Railway DEV Frontend: https://selfless-renewal-dev.up.railway.app
-- Railway DEV Backend:  https://engageflow-dev.up.railway.app
-- Railway PROD: https://selfless-renewal-production-9e39.up.railway.app
 - Default branch: dev  ← active engineering branch (GitHub repo default = main)
 - PR #1 (audit fixes): fix/profile-rotation-auth-timing-activity-feed
 
-NOTE: Frontend and backend are separate Railway services. Do not conflate URLs.
+## Railway (project: efficient-ambition)
+
+| Env | Frontend | Backend (service: engageflow) |
+|-----|----------|-------------------------------|
+| DEV | https://selfless-renewal-dev.up.railway.app | https://engageflow-dev.up.railway.app |
+| PROD | https://selfless-renewal-production-9e39.up.railway.app | (same project, production env) |
+
+Project ID: `f2cddd1a-3d44-47f6-bd18-5ce566b88da4`. Services: `engageflow` (backend), `selfless-renewal` (frontend).
 
 ## System Status
 
@@ -78,7 +84,7 @@ The system is considered healthy when:
 - **Backend DEV (Railway):** https://engageflow-dev.up.railway.app
 - **DEV VPS (legacy):** 72.61.147.80, path /docker/engageflow-dev, port 3001 — DO NOT DELETE YET; disable automation only after Railway passes.
 
-### Railway DEV Variables (backend service)
+### Railway DEV Variables (engageflow service)
 
 | Variable | Value | Required |
 |----------|-------|----------|
@@ -89,7 +95,7 @@ The system is considered healthy when:
 
 Backend MUST have a Volume mounted at `/data`. Redeploy after variable changes.
 
-### Railway DEV Variables (frontend service)
+### Railway DEV Variables (selfless-renewal service)
 
 | Variable | Value | Required |
 |----------|-------|----------|
@@ -99,16 +105,27 @@ Without this, deployed frontend throws "VITE_BACKEND_URL must be set when deploy
 
 ### Verification curls (Railway DEV)
 
+Cursor runs these (do not ask user):
+
 ```sh
 curl -sS https://engageflow-dev.up.railway.app/health
 # PASS: {"status":"ok","running":true}
 
+curl -sS https://engageflow-dev.up.railway.app/api/db-status
+# PASS: db_path=/data/engageflow.db, writable=true, db_file_exists=true
+
 curl -sS https://engageflow-dev.up.railway.app/debug/runtime
-# PASS: db_path=/data/engageflow.db, engine_running=true
+# PASS: db_path=/data/engageflow.db, engine_running=true (requires ENGAGEFLOW_DEBUG=1)
 
 curl -sS "https://engageflow-dev.up.railway.app/activity?limit=1"
 # PASS: newest timestamp < 5 min when actions execute
 ```
+
+### Railway build config (2026-03-04)
+
+- **Root Dockerfile:** `Dockerfile` at repo root builds backend from `backend/` (monorepo). Uses `railway.json` to point to it.
+- **PORT:** Backend CMD uses `$PORT` (Railway sets it; default 8000 local). Fixes 502/port mismatch.
+- **engageflow service:** If Railway uses root = backend, `backend/Dockerfile` is used. If root = `.`, root `Dockerfile` + `railway.json` used.
 
 ### VPS disable (only after Railway passes)
 
@@ -199,10 +216,9 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 ## Next Actions (max 10)
 
 1. Add `RAILWAY_API_TOKEN` (account token) for workflow `railway link` step.
-2. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
-2. Verify profile rotation with 2+ profiles in production.
-3. Verify activity timeline shows rows for all active profiles.
-4. —
+2. Set Railway DEV Variables on engageflow service: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
+3. Verify profile rotation with 2+ profiles in production.
+4. Verify activity timeline shows rows for all active profiles.
 5. —
 6. —
 7. —

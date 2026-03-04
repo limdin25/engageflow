@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
@@ -347,9 +347,61 @@ async def health(request: Request):
     return {"status": "ok", "running": running}
 
 
+def _get_db_status_payload() -> Dict[str, Any]:
+    """Robust DB diagnostics (never raises)."""
+    from datetime import datetime, timezone
+    db_path = str(DB_PATH)
+    db_exists = DB_PATH.exists()
+    db_size = DB_PATH.stat().st_size if db_exists else 0
+    writable = False
+    last_activity_timestamp: Optional[str] = None
+    user_version: Optional[int] = None
+    try:
+        with get_db() as db:
+            # writable: try to acquire write lock
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("COMMIT")
+            writable = True
+            row = db.execute(
+                "SELECT timestamp FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+            last_activity_timestamp = row["timestamp"] if row else None
+            uv = db.execute("PRAGMA user_version").fetchone()
+            user_version = uv[0] if uv is not None else None
+    except Exception as e:
+        pass  # writable, last_activity_timestamp stay default
+    return {
+        "db_path": db_path,
+        "db_file_exists": db_exists,
+        "db_size_bytes": db_size,
+        "writable": writable,
+        "last_activity_timestamp": last_activity_timestamp,
+        "user_version": user_version,
+        "now_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/db-status")
+async def api_db_status(request: Request):
+    """DB diagnostics. Always available. Never 500."""
+    try:
+        return _get_db_status_payload()
+    except Exception:
+        return {
+            "db_path": str(DB_PATH),
+            "db_file_exists": DB_PATH.exists(),
+            "db_size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+            "writable": False,
+            "last_activity_timestamp": None,
+            "user_version": None,
+            "now_utc": datetime.now(timezone.utc).isoformat(),
+            "error": "partial",
+        }
+
+
 @app.get("/debug/runtime")
 async def debug_runtime(request: Request):
-    """DEV-only: runtime diagnostics to prevent future DB/env guessing. Requires ENGAGEFLOW_DEBUG=1."""
+    """DEV-only: runtime diagnostics. Requires ENGAGEFLOW_DEBUG=1. Never 500."""
     if not ENGAGEFLOW_DEBUG:
         raise HTTPException(404, "Not found")
     db_path = str(DB_PATH)
@@ -363,13 +415,20 @@ async def debug_runtime(request: Request):
             engine_running = bool((status or {}).get("isRunning"))
     except Exception:
         pass
-    with get_db() as db:
-        newest_activity = db.execute(
-            "SELECT timestamp, profile, action FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
-        ).fetchone()
-        newest_queue = db.execute(
-            "SELECT scheduledFor, profile, community FROM queue_items ORDER BY scheduledFor ASC LIMIT 1"
-        ).fetchone()
+    newest_activity_timestamp = None
+    newest_queue_scheduledFor = None
+    try:
+        with get_db() as db:
+            newest_activity = db.execute(
+                "SELECT timestamp, profile, action FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+            newest_queue = db.execute(
+                "SELECT scheduledFor, profile, community FROM queue_items ORDER BY scheduledFor ASC LIMIT 1"
+            ).fetchone()
+            newest_activity_timestamp = newest_activity["timestamp"] if newest_activity else None
+            newest_queue_scheduledFor = newest_queue["scheduledFor"] if newest_queue else None
+    except Exception:
+        pass
     from datetime import datetime, timezone
     return {
         "db_path": db_path,
@@ -377,8 +436,8 @@ async def debug_runtime(request: Request):
         "db_size": db_size,
         "engine_running": engine_running,
         "now_utc": datetime.now(timezone.utc).isoformat(),
-        "newest_activity_timestamp": newest_activity["timestamp"] if newest_activity else None,
-        "newest_queue_scheduledFor": newest_queue["scheduledFor"] if newest_queue else None,
+        "newest_activity_timestamp": newest_activity_timestamp,
+        "newest_queue_scheduledFor": newest_queue_scheduledFor,
     }
 
 

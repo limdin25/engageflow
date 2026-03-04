@@ -404,3 +404,37 @@ Verification: Run `railway login` then `./scripts/railway-info.sh`. Add RAILWAY_
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #21 — Docs alignment: Railway project/service names
+
+Date: 2026-03-04
+Change: Aligned all MDs with consistent Railway terminology. Project: efficient-ambition. Service (backend): engageflow. Service (frontend): selfless-renewal. PROJECT_STATE: Railway table, engageflow/selfless-renewal labels. RAILWAY_ACCESS: project ID header, logs note. SECRETS_SETUP: table format. README: Railway deployment section.
+Files: docs/PROJECT_STATE.md, docs/RAILWAY_ACCESS.md, docs/SECRETS_SETUP.md, docs/PROJECT_HISTORY.md, README.md
+Tests: None
+Verification: All docs reference engageflow (not backend) for Railway service.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
+
+---
+
+## Entry #22 — Railway DEV: PORT, db-status, hardened endpoints
+
+Date: 2026-03-04
+Change: Fix Railway DEV 502/port mismatch and add robust DB diagnostics. Root causes: hardcoded port 8000 (Railway uses PORT), wrong build root (monorepo), no /api/db-status to prove DB path and writability.
+Files:
+- Dockerfile (root: builds backend from backend/)
+- railway.json (build config)
+- backend/Dockerfile (CMD uses $PORT)
+- backend/app.py (/api/db-status, hardened /debug/runtime)
+- backend/tests/test_db_status.py
+- backend/tests/test_scheduler_no_500.py
+- docs/PROJECT_STATE.md
+- docs/PROJECT_HISTORY.md
+Tests: pytest backend/tests -v (24 passed)
+Verification: /health, /api/db-status, /debug/runtime, /activity; Railway DEV running:true after deploy.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
