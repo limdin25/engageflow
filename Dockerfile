@@ -8,7 +8,7 @@ ENV TZ=Europe/London
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get install -y --no-install-recommends tzdata git \
     && ln -snf /usr/share/zoneinfo/Europe/London /etc/localtime \
     && echo Europe/London > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -17,7 +17,10 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m playwright install --with-deps chromium
 
+COPY . /tmp/repo
 COPY backend .
+RUN cd /tmp/repo && (git rev-parse HEAD 2>/dev/null || echo "unknown") > /app/.git_sha && \
+    date -u +%Y-%m-%dT%H:%M:%SZ > /app/.build_time 2>/dev/null || echo "unknown" > /app/.build_time
 
 EXPOSE 8000
 

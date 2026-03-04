@@ -493,3 +493,21 @@ Verification: curl /api/diagnostics, POST /automation/stop → 200
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #26 — Runtime fingerprint: git_sha, build_time, X-EngageFlow-Git-Sha header
+
+Date: 2026-03-04
+Change: Add deployment fingerprint to /api/diagnostics (git_sha, build_time_utc, service_name) and X-EngageFlow-Git-Sha response header on all API responses. Enables Hugo to verify deployed commit without terminal. Dockerfile bakes .git_sha and .build_time at build; app reads RAILWAY_GIT_COMMIT_SHA or .git_sha fallback.
+Files:
+- backend/app.py (_read_build_fingerprint, _BUILD_INFO, middleware header, diagnostics fields)
+- Dockerfile (git install, write .git_sha and .build_time at build)
+- backend/tests/test_automation_control.py (test_diagnostics_includes_git_sha_and_build_time)
+- docs/PROJECT_STATE.md, docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v (37 passed)
+Verification: curl /api/diagnostics → git_sha in JSON and X-EngageFlow-Git-Sha header
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

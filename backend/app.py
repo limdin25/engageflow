@@ -121,6 +121,38 @@ _DAILY_COUNTERS_RESET_LOCK = threading.Lock()
 DB_WRITE_RETRY_ATTEMPTS = 8
 DB_WRITE_RETRY_SLEEP_SECONDS = 0.08
 APP_BOOT_TS = time.time()
+
+def _read_build_fingerprint() -> Dict[str, str]:
+    """Runtime fingerprint: git_sha from RAILWAY_GIT_COMMIT_SHA or .git_sha file, build_time from env or .build_time file."""
+    git_sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("ENGAGEFLOW_GIT_SHA")
+    if not git_sha:
+        try:
+            p = Path(__file__).parent / ".git_sha"
+            if p.exists():
+                git_sha = p.read_text().strip() or "unknown"
+            else:
+                git_sha = "unknown"
+        except Exception:
+            git_sha = "unknown"
+    build_time = os.environ.get("ENGAGEFLOW_BUILD_TIME")
+    if not build_time:
+        try:
+            p = Path(__file__).parent / ".build_time"
+            if p.exists():
+                build_time = p.read_text().strip()
+        except Exception:
+            pass
+    if not build_time:
+        from datetime import datetime, timezone
+        build_time = datetime.fromtimestamp(APP_BOOT_TS, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "git_sha": git_sha,
+        "build_time_utc": build_time,
+        "service_name": os.environ.get("RAILWAY_SERVICE_NAME", "engageflow"),
+    }
+
+
+_BUILD_INFO = _read_build_fingerprint()
 PROFILE_LOGIN_MONITOR_ENABLED = str(os.environ.get("PROFILE_LOGIN_MONITOR_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 PROFILE_LOGIN_MONITOR_INTERVAL_SECONDS = max(1800, int(os.environ.get("PROFILE_LOGIN_MONITOR_INTERVAL_SECONDS", "7200")))
 DETAILED_TRACE_LOGS_ENABLED = str(os.environ.get("DETAILED_TRACE_LOGS_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -272,6 +304,8 @@ async def request_logging_middleware(request: Request, call_next):
     status_code = int(getattr(response, "status_code", 0) or 0)
     log_fn = LOGGER.warning if status_code >= 400 else LOGGER.info
     log_fn("HTTP %s %s -> %s (%.1fms)", request.method, request.url.path, status_code, elapsed_ms)
+    if hasattr(response, "headers"):
+        response.headers["X-EngageFlow-Git-Sha"] = _BUILD_INFO["git_sha"]
     return response
 
 
@@ -404,6 +438,9 @@ async def api_diagnostics(request: Request):
     """DEV diagnostics: system health, DB, engine state, last activity, recent errors, env flags. Never 500."""
     errors: List[str] = []
     result: Dict[str, Any] = {
+        "git_sha": _BUILD_INFO["git_sha"],
+        "build_time_utc": _BUILD_INFO["build_time_utc"],
+        "service_name": _BUILD_INFO["service_name"],
         "system_health": {"status": "unknown", "running": False},
         "database_status": None,
         "automation_engine_state": {"running": False, "current_task": None, "next_wakeup": None},

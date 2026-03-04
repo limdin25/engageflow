@@ -82,3 +82,17 @@ def test_api_diagnostics_returns_required_keys(client):
     assert "status" in data["system_health"]
     assert "running" in data["system_health"]
     assert "db_path" in data["environment_flags"]
+
+
+def test_diagnostics_includes_git_sha_and_build_time(client):
+    """GET /api/diagnostics returns git_sha, build_time_utc, service_name for deployment verification."""
+    r = client.get("/api/diagnostics")
+    assert r.status_code == 200
+    data = r.json()
+    assert "git_sha" in data
+    assert "build_time_utc" in data
+    assert "service_name" in data
+    assert isinstance(data["git_sha"], str)
+    assert isinstance(data["build_time_utc"], str)
+    assert data["service_name"] in ("engageflow", "unknown") or len(data["service_name"]) > 0
+    assert "X-EngageFlow-Git-Sha" in r.headers

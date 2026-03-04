@@ -124,7 +124,8 @@ curl -i -X POST https://engageflow-dev.up.railway.app/automation/stop
 # PASS: 200, JSON with isRunning=false (idempotent when already stopped)
 
 curl -sS https://engageflow-dev.up.railway.app/api/diagnostics
-# PASS: JSON with system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags
+# PASS: JSON with git_sha, build_time_utc, service_name, system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags
+# Response header X-EngageFlow-Git-Sha matches deployed commit
 ```
 
 ### Railway build config (2026-03-04)
