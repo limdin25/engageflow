@@ -6906,6 +6906,9 @@ async def automation_start(payload: AutomationStartRequest, request: Request):
         return await engine.start(payload.profiles, payload.globalSettings)
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
+    except Exception as exc:
+        LOGGER.exception("Automation start failed: %s", exc)
+        raise HTTPException(503, f"Start failed: {exc!s}")
 
 
 @app.post("/automation/stop")
@@ -6934,6 +6937,9 @@ async def automation_resume(request: Request):
         return await engine.resume()
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
+    except Exception as exc:
+        LOGGER.exception("Automation resume failed: %s", exc)
+        raise HTTPException(503, f"Resume failed: {exc!s}")
 
 
 @app.get("/automation/status")

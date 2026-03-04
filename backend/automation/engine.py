@@ -546,12 +546,37 @@ class AutomationEngine:
                 if SESSION_MONITOR_ENABLED
                 else None
             )
-            self._save_run_state_locked()
+            try:
+                self._save_run_state_locked()
+            except Exception as e:
+                LOGGER.warning("_save_run_state_locked during start: %s", e)
 
-        await self.publish_log("[SKOOL] Scheduler started", status="success")
+        try:
+            await self.publish_log("[SKOOL] Scheduler started", status="success")
+        except Exception:
+            pass
         if shifted_on_start > 0:
-            await self.publish_log(f"[SKOOL] Rescheduled {shifted_on_start} overdue queue task(s) after start", status="info")
-        return await self.get_status()
+            try:
+                await self.publish_log(f"[SKOOL] Rescheduled {shifted_on_start} overdue queue task(s) after start", status="info")
+            except Exception:
+                pass
+        try:
+            return await self.get_status()
+        except Exception as e:
+            LOGGER.warning("get_status after start: %s", e)
+            return {
+                "success": True,
+                "isRunning": True,
+                "isPaused": False,
+                "state": "running",
+                "runState": "running",
+                "countdownSeconds": 0,
+                "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
+                "currentProfileIndex": 0,
+                "profiles": [],
+                "stats": {},
+                "activity": [],
+            }
 
     async def stop(self) -> Dict[str, Any]:
         task_to_wait: Optional[asyncio.Task[None]] = None
@@ -4659,6 +4684,7 @@ class AutomationEngine:
             "current_profile_index": self._state.current_profile_index,
             "last_updated": datetime.now().isoformat(),
         }
+        self.run_state_file.parent.mkdir(parents=True, exist_ok=True)
         with self.run_state_file.open("w", encoding="utf-8") as f:
             json.dump(payload, f)
 
