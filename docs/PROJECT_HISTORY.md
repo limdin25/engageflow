@@ -293,3 +293,21 @@ Verification: ENGAGEFLOW_DEBUG=1 and curl /debug/runtime
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #14 — Canonical DEV to Railway + frontend determinism
+
+Date: 2026-03-04
+Change: Canonicalized DEV to Railway as single source of truth. Frontend: require VITE_BACKEND_URL when deployed (no fallback probing); use only VITE_BACKEND_URL when set. VPS automation to be disabled manually after Railway proves healthy.
+Files:
+- frontend/src/lib/api.ts (require VITE_BACKEND_URL when non-localhost; no fallback when env set)
+- frontend/src/lib/api.test.ts (TDD: use VITE_BACKEND_URL when set; throw when deployed without it)
+- docs/PROJECT_STATE.md (canonical DEV = Railway, exact vars, verification curls)
+- docs/PROJECT_HISTORY.md
+
+Tests: npm test (7 passed), pytest backend/tests (20 passed), npm run build (success)
+Verification: Set Railway vars per PROJECT_STATE.md; curl /health, /debug/runtime, /activity; disable VPS automation after Railway running:true.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

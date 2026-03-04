@@ -66,14 +66,48 @@ The system is considered healthy when:
 
 ## DEV Deployment (2026-03-04)
 
-- **Branch:** dev (commit 9ab1a77)
-- **Pushed:** Yes
+**Canonical DEV = Railway.** UI and automation run on Railway; VPS is legacy (automation disabled after Railway proves healthy).
+
+- **Branch:** dev (MANDATORY; do NOT touch main)
 - **Frontend DEV:** https://selfless-renewal-dev.up.railway.app
 - **Backend DEV (Railway):** https://engageflow-dev.up.railway.app
-- **DEV VPS:** 72.61.147.80, path /docker/engageflow-dev, port 3001
-- **Deploy steps:** `ssh root@72.61.147.80` → `cd /docker/engageflow-dev` → `git pull origin dev` → `docker compose up -d --build`
-- **Health:** `curl -sf http://72.61.147.80:3001/api/health` (VPS) | `curl -sS https://engageflow-dev.up.railway.app/health` (Railway)
-- **Railway DEV automation:** Set `ENGAGEFLOW_AUTOMATION_ENABLED=1` and `ENGAGEFLOW_DB_PATH=/data/engageflow.db` in Railway Variables for backend DEV service. Without these, health returns `running:false` and automation does not execute.
+- **DEV VPS (legacy):** 72.61.147.80, path /docker/engageflow-dev, port 3001 — DO NOT DELETE YET; disable automation only after Railway passes.
+
+### Railway DEV Variables (backend service)
+
+| Variable | Value | Required |
+|----------|-------|----------|
+| ENGAGEFLOW_DB_PATH | /data/engageflow.db | Yes |
+| ENGAGEFLOW_AUTOMATION_ENABLED | 1 | Yes |
+| ENGAGEFLOW_DEBUG | 1 | Temporary (proof) |
+| OPENAI_API_KEY | sk-... | Yes |
+
+Backend MUST have a Volume mounted at `/data`. Redeploy after variable changes.
+
+### Railway DEV Variables (frontend service)
+
+| Variable | Value | Required |
+|----------|-------|----------|
+| VITE_BACKEND_URL | https://engageflow-dev.up.railway.app | Yes |
+
+Without this, deployed frontend throws "VITE_BACKEND_URL must be set when deployed".
+
+### Verification curls (Railway DEV)
+
+```sh
+curl -sS https://engageflow-dev.up.railway.app/health
+# PASS: {"status":"ok","running":true}
+
+curl -sS https://engageflow-dev.up.railway.app/debug/runtime
+# PASS: db_path=/data/engageflow.db, engine_running=true
+
+curl -sS "https://engageflow-dev.up.railway.app/activity?limit=1"
+# PASS: newest timestamp < 5 min when actions execute
+```
+
+### VPS disable (only after Railway passes)
+
+On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker compose up -d --build`. Verify: `curl -sS http://72.61.147.80:3001/api/health` → `running:false`.
 
 ## Dashboard Scheduling UI (2026-03-03)
 
