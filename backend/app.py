@@ -399,6 +399,24 @@ async def debug_scheduler(request: Request):
         return {"success": True, "running": False, "paused": False}
 
 
+@app.get("/debug/logs")
+async def debug_logs(request: Request):
+    """DEV-only: last 100 log lines. Requires ENGAGEFLOW_DEBUG=1."""
+    if not ENGAGEFLOW_DEBUG:
+        raise HTTPException(404, "Not found")
+    limit = 100
+    log_path = LOG_DIR / "engageflow.log"
+    lines: List[str] = []
+    try:
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            lines = all_lines[-limit:] if len(all_lines) > limit else all_lines
+    except Exception as e:
+        lines = [f"[error reading log: {e!s}]\n"]
+    return {"success": True, "lines": lines, "count": len(lines)}
+
+
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
     text = str(message or "").replace("\x00", "").strip()
     if len(text) <= max_len:

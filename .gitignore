@@ -32,6 +32,7 @@ backend/logs/
 backend/.env
 .env
 .env.*
+.railway-secrets
 
 # Python cache (fallback)
 __pycache__/
