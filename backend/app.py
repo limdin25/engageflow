@@ -399,6 +399,61 @@ async def api_db_status(request: Request):
         }
 
 
+@app.get("/api/diagnostics")
+async def api_diagnostics(request: Request):
+    """DEV diagnostics: system health, DB, engine state, last activity, recent errors, env flags. Never 500."""
+    errors: List[str] = []
+    result: Dict[str, Any] = {
+        "system_health": {"status": "unknown", "running": False},
+        "database_status": None,
+        "automation_engine_state": {"running": False, "current_task": None, "next_wakeup": None},
+        "last_activity_timestamp": None,
+        "recent_errors": [],
+        "environment_flags": {
+            "ENGAGEFLOW_AUTOMATION_ENABLED": ENGAGEFLOW_AUTOMATION_ENABLED,
+            "ENGAGEFLOW_DEBUG": ENGAGEFLOW_DEBUG,
+            "db_path": str(DB_PATH),
+        },
+    }
+    try:
+        engine = getattr(request.app.state, "automation_engine", None)
+        if engine:
+            try:
+                status = await engine.get_status()
+                running = bool((status or {}).get("isRunning"))
+                result["system_health"] = {"status": "ok", "running": running}
+                result["automation_engine_state"] = {
+                    "running": running,
+                    "current_task": (status or {}).get("runState"),
+                    "next_wakeup": (status or {}).get("countdownSeconds"),
+                }
+            except Exception as e:
+                errors.append(f"engine.get_status: {e!s}")
+                result["system_health"] = {"status": "error", "running": False}
+        else:
+            result["system_health"] = {"status": "ok", "running": False}
+    except Exception as e:
+        errors.append(f"engine_access: {e!s}")
+    try:
+        result["database_status"] = _get_db_status_payload()
+        result["last_activity_timestamp"] = result["database_status"].get("last_activity_timestamp")
+    except Exception as e:
+        errors.append(f"db_status: {e!s}")
+        result["database_status"] = {"error": str(e)}
+    try:
+        log_path = LOG_DIR / "engageflow.log"
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            err_lines = [l.strip() for l in all_lines[-50:] if l and ("ERROR" in l or "Exception" in l or "Traceback" in l)]
+            result["recent_errors"] = err_lines[-10:]
+    except Exception as e:
+        errors.append(f"log_read: {e!s}")
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 @app.get("/debug/runtime")
 async def debug_runtime(request: Request):
     """DEV-only: runtime diagnostics. Requires ENGAGEFLOW_DEBUG=1. Never 500."""
@@ -6928,6 +6983,15 @@ def _idempotent_stopped_response() -> Dict[str, Any]:
     }
 
 
+@app.get("/automation/stop")
+async def automation_stop_get(request: Request):
+    """GET returns current status (idempotent). Use POST to actually stop."""
+    engine = getattr(request.app.state, "automation_engine", None)
+    if engine is None:
+        return _idempotent_stopped_response()
+    return await engine.get_status()
+
+
 @app.post("/automation/stop")
 async def automation_stop(request: Request):
     engine = getattr(request.app.state, "automation_engine", None)
@@ -6935,8 +6999,16 @@ async def automation_stop(request: Request):
         return _idempotent_stopped_response()
     try:
         return await engine.stop()
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         LOGGER.exception("Automation stop failed: %s", exc)
+        try:
+            status = await engine.get_status()
+            if not bool((status or {}).get("isRunning")):
+                return status
+        except Exception:
+            pass
         raise HTTPException(503, f"Stop failed: {exc!s}")
 
 

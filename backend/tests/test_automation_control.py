@@ -53,15 +53,32 @@ def test_stop_idempotent_when_already_stopped(client):
 
 
 def test_stop_no_500_when_engine_missing(client):
-    """POST /automation/stop must not return 500 when engine not ready (AttributeError from get_automation_engine)."""
-    from app import get_automation_engine
-
-    def _raise(_):
-        raise AttributeError("automation_engine")
-
-    with patch("app.get_automation_engine", side_effect=_raise):
+    """POST /automation/stop must not return 500 when engine not ready (app.state.automation_engine missing)."""
+    app = client.app
+    engine = getattr(app.state, "automation_engine", None)
+    if engine is not None:
+        del app.state.automation_engine
+    try:
         r = client.post("/automation/stop")
-    # Must not return 500 (Internal server error); idempotent 200 when no engine = already stopped
-    assert r.status_code != 500, f"Stop must not return 500: {r.text}"
-    assert r.status_code == 200
-    assert r.json().get("isRunning") is False
+        assert r.status_code != 500, f"Stop must not return 500: {r.text}"
+        assert r.status_code == 200
+        assert r.json().get("isRunning") is False
+    finally:
+        if engine is not None:
+            app.state.automation_engine = engine
+
+
+def test_api_diagnostics_returns_required_keys(client):
+    """GET /api/diagnostics returns required keys: system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags."""
+    r = client.get("/api/diagnostics")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    data = r.json()
+    assert "system_health" in data
+    assert "database_status" in data
+    assert "automation_engine_state" in data
+    assert "last_activity_timestamp" in data
+    assert "recent_errors" in data
+    assert "environment_flags" in data
+    assert "status" in data["system_health"]
+    assert "running" in data["system_health"]
+    assert "db_path" in data["environment_flags"]

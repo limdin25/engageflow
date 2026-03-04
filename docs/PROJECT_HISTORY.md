@@ -475,3 +475,21 @@ Verification: curl -i -X POST https://engageflow-dev.up.railway.app/automation/s
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #25 — /api/diagnostics + Stop robustness
+
+Date: 2026-03-04
+Change: Added GET /api/diagnostics (DISCIPLINE requirement). Returns system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags. Never 500. Stop endpoint: when engine.stop() raises, check if isRunning already false and return 200 with status instead of 503. GET /automation/stop returns status (fixes 405 when frontend probe uses GET). TDD: test_api_diagnostics_returns_required_keys, test_stop_no_500_when_engine_missing (real engine removal).
+Files:
+- backend/app.py (/api/diagnostics, stop fallback when stop() throws but already stopped, GET /automation/stop)
+- backend/tests/test_automation_control.py (test_api_diagnostics_returns_required_keys, test_stop_no_500_when_engine_missing fix)
+- docs/PROJECT_STATE.md (verification curl for /api/diagnostics)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v (36 passed)
+Verification: curl /api/diagnostics, POST /automation/stop → 200
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
