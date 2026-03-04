@@ -2,7 +2,7 @@
 
 **Goal:** Railway Joiner and EngageFlow read the SAME SQLite database file, so `cookie_json` written anywhere is visible everywhere.
 
-**Status:** Phase 1 (backend dbinfo) complete. Phase 2–5 require Railway dashboard changes and optional Joiner patch.
+**Status:** Phase 1–2 complete (dbinfo + WAL). **Phase 3 BLOCKED** — Railway does NOT support shared volumes between 2 services. See [OPTION1_FINISH_REPORT.md](./OPTION1_FINISH_REPORT.md).
 
 ---
 
@@ -192,7 +192,7 @@ Joiner will revert to syncing from EngageFlow API (no `cookie_json`). Accounts w
 |------|--------|
 | Baseline commit | `d05e138` on dev |
 | EngageFlow /debug/dbinfo | Added (gated by ENGAGEFLOW_DEBUG=1) |
-| Joiner /debug/dbinfo | Patch provided (apply if joiner in separate repo) |
+| Joiner /debug/dbinfo | **Applied** (commit 314cabb) |
 | WAL/busy_timeout EngageFlow | Already enabled |
-| WAL/busy_timeout Joiner engageflowDb | Patch provided |
+| WAL/busy_timeout Joiner engageflowDb | **Applied** (commit 314cabb) |
 | Railway config | Manual steps in Phase 2 |
