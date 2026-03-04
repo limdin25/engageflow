@@ -134,7 +134,7 @@ curl -i -X POST https://engageflow-dev.up.railway.app/automation/stop
 # PASS: 200, JSON with isRunning=false, request_id; header X-Request-Id present (idempotent when already stopped)
 
 curl -sS https://engageflow-dev.up.railway.app/api/diagnostics
-# PASS: JSON with git_sha, build_time_utc, service_name, system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags
+# PASS: JSON with git_sha, build_time_utc, service_name, system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags, scheduler_truth_packet (now_server_utc, next_action_id, next_run_at_absolute, eta_seconds, scheduler_source_of_truth, db_path, engine_state)
 # Response header X-EngageFlow-Git-Sha matches deployed commit
 ```
 
@@ -236,7 +236,7 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 2. Set Railway DEV Variables on engageflow service: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 3. Verify profile rotation with 2+ profiles in production.
 4. Verify activity timeline shows rows for all active profiles.
-5. Entry #37: Countdown persists across refresh (nextScheduledFor from queue).
+5. Entry #37–38: Countdown persists across refresh (nextScheduledFor preferred; when isWaitingSchedule, still use queue when available).
 6. —
 7. —
 8. —

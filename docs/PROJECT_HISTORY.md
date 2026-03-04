@@ -704,3 +704,24 @@ Verification: Start automation, refresh UI multiple times; countdown continues c
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #38 — Countdown reset on refresh (isWaitingSchedule override fix) + scheduler diagnostics
+
+Date: 2026-03-04
+Change: Frontend was using countdownSeconds when runState=waiting_schedule, ignoring nextScheduledFor. Fix: prefer nextScheduledFor over countdownSeconds when queue has future items, even when isWaitingSchedule. Added scheduler_truth_packet to /api/diagnostics (now_server_utc, next_action_id, next_run_at_absolute, eta_seconds, scheduler_source_of_truth, db_path, db_file_modified_time, engine_state, last_activity_timestamp). Added SCHED_DECISION log when _get_next_scheduled_for_from_queue returns queue item. Added ACT_WRITE log when activity_feed rows inserted.
+Files:
+- frontend/src/pages/DashboardPage.tsx (nextCountdown: prefer nextScheduledFor when available, only use countdownSeconds when no queue items)
+- backend/app.py (scheduler_truth_packet in /api/diagnostics)
+- backend/automation/engine.py (SCHED_DECISION in _get_next_scheduled_for_from_queue, ACT_WRITE in _persist_activity_rows, SELECT id in queue query)
+- backend/tests/test_scheduler_truth_packet.py (new)
+- docs/PROJECT_HISTORY.md
+- docs/PROJECT_STATE.md
+
+Reason: UI showed "Next action in 4m 58s", on refresh reset to 5 minutes. Entry #37 added nextScheduledFor but frontend still used countdownSeconds when isWaitingSchedule=true (all profiles outside schedule). Queue can have future items from earlier prefill; countdown must use queue schedule, not scheduler-loop wait.
+Tests: pytest backend/tests -q (67 passed)
+Verification: Start automation, refresh UI multiple times; countdown continues correctly; curl /api/diagnostics shows scheduler_truth_packet
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW

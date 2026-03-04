@@ -485,13 +485,15 @@ export default function DashboardPage() {
   const nextCountdown = (() => {
     if (!engineStatus?.isRunning || engineStatus?.isPaused) return "Waiting for start";
     if (connectionRest?.active) return formatNextActionCountdown(connectionRest.remainingSeconds);
-    if (isWaitingSchedule) {
-      const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
-      if (sec > 0) return formatNextActionCountdown(sec);
-      return "Starting...";
-    }
     if (displayActiveTask) return "Executing";
-    if (!nextQueueItem && !engineStatus?.nextScheduledFor) return emptyQueueReason || "No actions scheduled";
+    if (!nextQueueItem && !engineStatus?.nextScheduledFor) {
+      if (isWaitingSchedule) {
+        const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
+        if (sec > 0) return formatNextActionCountdown(sec);
+        return "Starting...";
+      }
+      return emptyQueueReason || "No actions scheduled";
+    }
     const apiScheduled = String(engineStatus?.nextScheduledFor || "").trim();
     if (apiScheduled) {
       const ts = Date.parse(apiScheduled.replace(" ", "T"));

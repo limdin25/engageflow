@@ -551,6 +551,52 @@ async def api_diagnostics(request: Request):
         errors.append(f"db_status: {e!s}")
         result["database_status"] = {"error": str(e)}
     try:
+        db_path = str(DB_PATH)
+        db_file_modified_time = DB_PATH.stat().st_mtime if DB_PATH.exists() else 0
+        engine = getattr(request.app.state, "automation_engine", None)
+        now_server_utc = datetime.now(timezone.utc).isoformat()
+        next_action_id = None
+        next_run_at_absolute = None
+        eta_seconds = 0
+        scheduler_source_of_truth = "none"
+        engine_state = "unknown"
+        if engine:
+            try:
+                status = await engine.get_status()
+                engine_state = str((status or {}).get("runState", "unknown"))
+                next_run_at_absolute = (status or {}).get("nextScheduledFor")
+                eta_seconds = int((status or {}).get("countdownSeconds", 0) or 0)
+                if next_run_at_absolute:
+                    scheduler_source_of_truth = "queue"
+                elif engine_state in ("running", "waiting_schedule"):
+                    scheduler_source_of_truth = "scheduler_loop"
+                now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                with get_db() as db:
+                    row = db.execute(
+                        "SELECT id, scheduledFor FROM queue_items WHERE scheduledFor > ? ORDER BY scheduledFor ASC LIMIT 1",
+                        (now_iso,),
+                    ).fetchone()
+                    if row:
+                        next_action_id = row.get("id")
+                        if not next_run_at_absolute:
+                            next_run_at_absolute = row.get("scheduledFor")
+            except Exception as e:
+                errors.append(f"scheduler_truth: {e!s}")
+        result["scheduler_truth_packet"] = {
+            "now_server_utc": now_server_utc,
+            "next_action_id": next_action_id,
+            "next_run_at_absolute": next_run_at_absolute,
+            "eta_seconds": eta_seconds,
+            "scheduler_source_of_truth": scheduler_source_of_truth,
+            "db_path": db_path,
+            "db_file_modified_time": db_file_modified_time,
+            "engine_state": engine_state,
+            "last_activity_timestamp": result.get("last_activity_timestamp"),
+        }
+    except Exception as e:
+        errors.append(f"scheduler_truth_packet: {e!s}")
+        result["scheduler_truth_packet"] = {"error": str(e)}
+    try:
         mem_errors = list(_RECENT_ERRORS)
         log_path = LOG_DIR / "engageflow.log"
         if log_path.exists():

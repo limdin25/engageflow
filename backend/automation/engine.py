@@ -3746,7 +3746,7 @@ class AutomationEngine:
             with self._db() as db:
                 row = db.execute(
                     """
-                    SELECT scheduledFor FROM queue_items
+                    SELECT id, profileId, scheduledFor FROM queue_items
                     WHERE scheduledFor > ?
                     ORDER BY scheduledFor ASC
                     LIMIT 1
@@ -3771,7 +3771,18 @@ class AutomationEngine:
             if target is None:
                 return (None, 0)
             delta = (target - now_dt).total_seconds()
-            return (raw, max(0, int(delta)))
+            eta_secs = max(0, int(delta))
+            action_id = row.get("id") if row else None
+            profile_id = row.get("profileId") if row else None
+            LOGGER.info(
+                "SCHED_DECISION profile_id=%s action_id=%s next_run_at=%s eta_seconds=%s db_path=%s decision_reason=queue_earliest_future",
+                profile_id,
+                action_id,
+                raw,
+                eta_secs,
+                str(self.db_path),
+            )
+            return (raw, eta_secs)
         except Exception:
             return (None, 0)
 
@@ -4205,6 +4216,7 @@ class AutomationEngine:
                         profile_for_feed = str(name_row["name"])
                     else:
                         profile_for_feed = "SYSTEM"  # UUID never matches profiles.name JOIN
+                ts_val = row.get("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
                 db.execute(
                     """
                     INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl)
@@ -4215,9 +4227,16 @@ class AutomationEngine:
                         profile_for_feed,
                         row.get("community", ""),
                         row.get("result", "Commented"),
-                        row.get("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
+                        ts_val,
                         row.get("postUrl", ""),
                     ),
+                )
+                LOGGER.info(
+                    "ACT_WRITE action_id=%s timestamp=%s db_path=%s row_id=%s",
+                    event_id,
+                    ts_val,
+                    str(self.db_path),
+                    event_id,
                 )
                 db.execute(
                     """
