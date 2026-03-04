@@ -675,6 +675,18 @@ async def debug_runtime(request: Request):
     }
 
 
+@app.get("/debug/version")
+def debug_version():
+    """ENGAGEFLOW_DEBUG=1: returns git_sha, branch, build_time for deployment verification."""
+    if not ENGAGEFLOW_DEBUG:
+        raise HTTPException(404, "Not found")
+    return JSONResponse({
+        "git_sha": _BUILD_INFO["git_sha"],
+        "branch": os.environ.get("RAILWAY_GIT_BRANCH", "unknown"),
+        "build_time": _BUILD_INFO["build_time_utc"],
+    })
+
+
 @app.get("/debug/dbinfo")
 def debug_dbinfo():
     """Railway-only: DB path, size, profiles counts. Requires ENGAGEFLOW_DEBUG=1. No cookie contents."""
