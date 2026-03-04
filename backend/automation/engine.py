@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -414,8 +415,30 @@ class AutomationEngine:
         self._queue_post_cooldown_until: Dict[str, float] = {}
         self._queue_community_cooldown_until: Dict[str, float] = {}
         self._prefill_skip_log_state: Dict[str, Dict[str, float]] = {}
+        self._lifecycle_trace: deque = deque(maxlen=100)
 
         self._hydrate_state_from_disk()
+
+    def _emit_lifecycle(
+        self,
+        event: str,
+        task_id: str = "",
+        profile_id: str = "",
+        action_type: str = "",
+        state: str = "",
+        **extra: Any,
+    ) -> None:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "task_id": task_id,
+            "profile_id": profile_id,
+            "action_type": action_type,
+            "state": state,
+            **extra,
+        }
+        self._lifecycle_trace.append(entry)
+        LOGGER.info("[LIFECYCLE] %s task_id=%s profile_id=%s state=%s", event, task_id, profile_id, state)
     async def subscribe(self) -> asyncio.Queue[Dict[str, Any]]:
         q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=1000)
         async with self._lock:
@@ -1426,6 +1449,7 @@ class AutomationEngine:
                     self._state.stats["total_skipped"] += run_result.skipped_count
                     self._state.stats["total_blacklisted"] += run_result.blacklisted_count
                     self._state.activity_rows.extend(run_result.activity_rows)
+                    self._emit_lifecycle("PERSIST_ACTIVITY_SHOULD_BE_CALLED", profile_id=str(applied_profile.get("id", "") or ""), action_type="", state="before_persist", row_count=len(run_result.activity_rows))
                     self._persist_activity_rows(run_result.activity_rows)
                     self._update_profile_locked(applied_profile)
                     self._save_run_state_locked()
@@ -2555,10 +2579,13 @@ class AutomationEngine:
                         try:
                             post_url = selected["post_url"]
                             task_ref = str(selected.get("queue_id") or _extract_task_ref_from_post_url(post_url) or "n/a")
+                            if bool(selected.get("from_queue")):
+                                self._emit_lifecycle("TASK_PICKED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="picked")
                             if bool(selected.get("from_queue")) and not bool(selected.get("_queue_claimed")):
                                 # Remove active task from queue immediately when execution starts.
                                 self._remove_queue_item(profile_id, post_url)
                                 selected["_queue_claimed"] = True
+                                self._emit_lifecycle("TASK_STARTED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="running")
                             self._insert_log(
                                 {
                                     "id": str(uuid.uuid4()),
@@ -2869,6 +2896,7 @@ class AutomationEngine:
                                 "result": "Commented",
                                 "skipReason": "",
                             })
+                            self._emit_lifecycle("TASK_COMPLETED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="completed")
                             self._remove_queue_item(profile_id, post_url)
                             norm_post_url = self._normalize_url(post_url)
                             if norm_post_url:
@@ -2907,6 +2935,8 @@ class AutomationEngine:
                             if community_daily_limit and community_actions_today >= community_daily_limit:
                                 break
                         except Exception as exc:
+                            task_ref_fail = str(selected.get("queue_id") or _extract_task_ref_from_post_url(post_url) or "n/a")
+                            self._emit_lifecycle("TASK_FAILED", task_id=task_ref_fail, profile_id=str(profile_id or ""), action_type="comment", state="failed", error=str(exc)[:200])
                             err_text = str(exc or "").strip().lower()
                             send_error_detail = ""
                             if err_text.startswith("send_or_dom_error:"):
@@ -4018,7 +4048,16 @@ class AutomationEngine:
 
     def _persist_activity_rows(self, activity_rows: List[Dict[str, Any]]) -> None:
         if not activity_rows:
+            self._emit_lifecycle("ACTIVITY_LOGGED", task_id="", profile_id="", action_type="", state="skipped_empty")
             return
+        for row in activity_rows:
+            self._emit_lifecycle(
+                "ACTIVITY_LOGGED",
+                task_id=str(row.get("postUrl", row.get("id", ""))),
+                profile_id=str(row.get("profileId", "")),
+                action_type=str(row.get("result", "Commented")),
+                state="persisted",
+            )
         with self._db() as db:
             db.execute(
                 """
@@ -4185,6 +4224,7 @@ class AutomationEngine:
         canonical_post_url = self._normalize_url(post_url) or str(post_url or "").strip()
         if not canonical_post_url:
             return
+        self._emit_lifecycle("QUEUE_ITEM_REMOVED", task_id=canonical_post_url[:80], profile_id=str(profile_id or ""), action_type="queue", state="removed")
         with self._db() as db:
             rows = db.execute(
                 "SELECT id, postId FROM queue_items WHERE profileId = ?",

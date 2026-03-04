@@ -6590,6 +6590,34 @@ def _normalize_activity_timestamp(ts: str) -> str:
     return s
 
 
+@app.get("/api/logs")
+def read_automation_lifecycle_logs(request: Request, limit: int = 50):
+    """Return last N automation lifecycle trace entries for diagnosing executor stall."""
+    engine = getattr(request.app.state, "automation_engine", None)
+    if not engine or not hasattr(engine, "_lifecycle_trace"):
+        return {"success": True, "entries": [], "count": 0}
+    trace = list(engine._lifecycle_trace)
+    safe_limit = max(10, min(100, int(limit or 50)))
+    entries = trace[-safe_limit:]
+    return {
+        "success": True,
+        "entries": [
+            dict(
+                timestamp=e.get("timestamp", ""),
+                task_id=e.get("task_id", ""),
+                profile_id=e.get("profile_id", ""),
+                action_type=e.get("action_type", ""),
+                state=e.get("state", ""),
+                event=e.get("event", ""),
+                row_count=e.get("row_count"),
+                error=e.get("error"),
+            )
+            for e in entries
+        ],
+        "count": len(entries),
+    }
+
+
 @app.get("/activity", response_model=List[ActivityEntryModel])
 def read_activity(profile: Optional[str] = None, limit: int = 100):
     # Show timeline only for currently active profiles. LIMIT 100 enforced.
