@@ -233,6 +233,7 @@ export interface AutomationEngineStatus {
   state: string;
   runState: string;
   countdownSeconds: number;
+  nextScheduledFor?: string | null;
   connectionRest?: {
     active: boolean;
     remainingSeconds: number;

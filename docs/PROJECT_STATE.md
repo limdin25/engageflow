@@ -236,7 +236,7 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 2. Set Railway DEV Variables on engageflow service: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 3. Verify profile rotation with 2+ profiles in production.
 4. Verify activity timeline shows rows for all active profiles.
-5. —
+5. Entry #37: Countdown persists across refresh (nextScheduledFor from queue).
 6. —
 7. —
 8. —

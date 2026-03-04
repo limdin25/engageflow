@@ -491,19 +491,31 @@ export default function DashboardPage() {
       return "Starting...";
     }
     if (displayActiveTask) return "Executing";
-    if (!nextQueueItem) return emptyQueueReason || "No actions scheduled";
-    const scheduledMs = parseQueueTimestampMs(
-      String(nextQueueItem.scheduledFor || ""),
-      String(nextQueueItem.scheduledTime || ""),
-      adjustedQueueNowMs,
-    );
-    if (Number.isFinite(scheduledMs)) {
-      const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
-      if (secondsLeft <= 0) return "Starting...";
-      return formatNextActionCountdown(secondsLeft);
+    if (!nextQueueItem && !engineStatus?.nextScheduledFor) return emptyQueueReason || "No actions scheduled";
+    const apiScheduled = String(engineStatus?.nextScheduledFor || "").trim();
+    if (apiScheduled) {
+      const ts = Date.parse(apiScheduled.replace(" ", "T"));
+      if (Number.isFinite(ts)) {
+        const secondsLeft = Math.floor((ts - adjustedQueueNowMs) / 1000);
+        if (secondsLeft <= 0) return "Starting...";
+        return formatNextActionCountdown(secondsLeft);
+      }
     }
-    if ((engineStatus.countdownSeconds ?? 0) <= 0) return "Starting...";
-    return formatNextActionCountdown(engineStatus.countdownSeconds);
+    if (nextQueueItem) {
+      const scheduledMs = parseQueueTimestampMs(
+        String(nextQueueItem.scheduledFor || ""),
+        String(nextQueueItem.scheduledTime || ""),
+        adjustedQueueNowMs,
+      );
+      if (Number.isFinite(scheduledMs)) {
+        const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
+        if (secondsLeft <= 0) return "Starting...";
+        return formatNextActionCountdown(secondsLeft);
+      }
+    }
+    const apiCountdown = Number(engineStatus?.countdownSeconds ?? 0);
+    if (apiCountdown <= 0) return "Starting...";
+    return formatNextActionCountdown(apiCountdown);
   })();
   useEffect(() => {
     const timer = window.setInterval(() => {

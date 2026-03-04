@@ -684,3 +684,23 @@ Verification: curl /api/communities and /communities both return 200; frontend l
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #37 — Countdown persists across refresh (nextScheduledFor from queue)
+
+Date: 2026-03-04
+Change: Backend automation status now returns `nextScheduledFor` (ISO string) and `countdownSeconds` computed from earliest future queue item when runState is running. Frontend prefers `nextScheduledFor` when available to compute countdown client-side, so refresh does not reset timer to scheduler-loop value.
+Files:
+- backend/automation/engine.py (_get_next_scheduled_for_from_queue, get_status)
+- frontend/src/lib/api.ts (AutomationEngineStatus.nextScheduledFor)
+- frontend/src/pages/DashboardPage.tsx (nextCountdown prefers nextScheduledFor)
+- backend/tests/test_countdown_persistence.py (new)
+- docs/PROJECT_HISTORY.md
+
+Reason: UI showed "Next action in 4m 58s", on refresh reset to 5 minutes. Root cause: frontend fell back to engineStatus.countdownSeconds when queue parse failed; backend countdown reflected scheduler loop wait, not queue schedule.
+Tests: pytest backend/tests -q (65 passed)
+Verification: Start automation, refresh UI multiple times; countdown continues correctly; activity timeline updates within 5s
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW

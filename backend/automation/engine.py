@@ -480,13 +480,26 @@ class AutomationEngine:
                 if "password" in item:
                     item["password"] = ""
                 profiles_safe.append(item)
+            countdown = self._state.countdown_seconds
+            next_scheduled_for: Optional[str] = None
+            if (
+                self._state.is_running
+                and not self._state.is_paused
+                and not self._state.connection_rest_active
+                and self._state.run_state in ("running", "waiting_schedule")
+            ):
+                next_iso, secs = self._get_next_scheduled_for_from_queue()
+                if next_iso and secs >= 0:
+                    next_scheduled_for = next_iso
+                    countdown = secs
             return {
                 "success": True,
                 "isRunning": self._state.is_running,
                 "isPaused": self._state.is_paused,
                 "state": self._state.run_state,
                 "runState": self._state.run_state,
-                "countdownSeconds": self._state.countdown_seconds,
+                "countdownSeconds": countdown,
+                "nextScheduledFor": next_scheduled_for,
                 "connectionRest": {
                     "active": bool(self._state.connection_rest_active),
                     "remainingSeconds": int(self._state.connection_rest_remaining_seconds or 0),
@@ -3724,6 +3737,43 @@ class AutomationEngine:
                 return int(row["cnt"] if row and "cnt" in row.keys() else 0)
         except Exception:
             return 1
+
+    def _get_next_scheduled_for_from_queue(self) -> Tuple[Optional[str], int]:
+        """Return (scheduled_for_iso, seconds_until) for earliest future queue item. (None, 0) if none."""
+        try:
+            now_dt = datetime.now(timezone.utc)
+            now_iso = now_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+            with self._db() as db:
+                row = db.execute(
+                    """
+                    SELECT scheduledFor FROM queue_items
+                    WHERE scheduledFor > ?
+                    ORDER BY scheduledFor ASC
+                    LIMIT 1
+                    """,
+                    (now_iso,),
+                ).fetchone()
+            if not row or not row.get("scheduledFor"):
+                return (None, 0)
+            raw = str(row["scheduledFor"] or "").strip()
+            if not raw:
+                return (None, 0)
+            target = None
+            for candidate in [raw, raw.replace(" ", "T") + "Z"]:
+                try:
+                    s = candidate.replace("Z", "+00:00")
+                    target = datetime.fromisoformat(s)
+                    if target.tzinfo is None:
+                        target = target.replace(tzinfo=timezone.utc)
+                    break
+                except Exception:
+                    continue
+            if target is None:
+                return (None, 0)
+            delta = (target - now_dt).total_seconds()
+            return (raw, max(0, int(delta)))
+        except Exception:
+            return (None, 0)
 
     def _count_pending_queue_for_profile(self, profile_id: str) -> int:
         pid = str(profile_id or "").strip()
