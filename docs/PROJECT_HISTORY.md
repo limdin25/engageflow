@@ -348,3 +348,20 @@ Verification: git diff HEAD~1 docs/ matches only lines above
 Reversal: `git revert HEAD --no-edit && git push origin dev`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #17 — Railway autonomy: workflow + /debug/logs
+
+Date: 2026-03-04
+Change: Cursor controls Railway via GitHub Actions. Added .github/workflows/railway.yml (sets ENGAGEFLOW_DEBUG=1 on push to dev), GET /debug/logs endpoint (last 100 lines from engageflow.log), docs/SECRETS_SETUP.md, .railway-secrets (gitignored) for token values.
+Files:
+- .github/workflows/railway.yml
+- backend/app.py (/debug/logs)
+- docs/SECRETS_SETUP.md
+- .gitignore (.railway-secrets)
+Tests: pytest -q (20 passed)
+Verification: Add RAILWAY_TOKEN + RAILWAY_PROJECT_ID to GitHub Secrets; workflow runs on push; curl /debug/logs after deploy.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

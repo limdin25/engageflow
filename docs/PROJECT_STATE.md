@@ -177,9 +177,16 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 - **Proof signal:** `GET /debug/runtime` (requires `ENGAGEFLOW_DEBUG=1`) returns db_path, db_file_exists, engine_running, newest_activity_timestamp, newest_queue_scheduledFor. Use to verify no guessing.
 - **Defensive:** Backend normalizes activity timestamps (append Z when no timezone). backend/tests/test_activity_timestamp.py, test_debug_runtime.py.
 
+## Railway Autonomy (2026-03-04)
+
+- **Workflow:** `.github/workflows/railway.yml` — on push to dev, sets `ENGAGEFLOW_DEBUG=1` via Railway CLI.
+- **Endpoint:** `GET /debug/logs` — last 100 log lines (gated by `ENGAGEFLOW_DEBUG=1`).
+- **Secrets:** Add `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` to GitHub Secrets. See `docs/SECRETS_SETUP.md`. Values in `.railway-secrets` (gitignored).
+
 ## Next Actions (max 10)
 
-1. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
+1. Add RAILWAY_TOKEN and RAILWAY_PROJECT_ID to GitHub Secrets (from .railway-secrets).
+2. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 2. Verify profile rotation with 2+ profiles in production.
 3. Verify activity timeline shows rows for all active profiles.
 4. —
