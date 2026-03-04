@@ -33,8 +33,8 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway link ${{ secrets.RAILWAY_PROJECT_ID }} --service backend
-          railway variables set ENGAGEFLOW_DEBUG=1 --service backend
+          railway link --project ${{ secrets.RAILWAY_PROJECT_ID }} --service backend --json
+          railway variable set ENGAGEFLOW_DEBUG=1 --service backend
           echo "Railway DEV vars updated."
 
   railway-main:
@@ -55,6 +55,6 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
         run: |
-          railway link ${{ secrets.RAILWAY_PROJECT_ID }} --service backend
-          railway variables set ENGAGEFLOW_DEBUG=0 --service backend
+          railway link --project ${{ secrets.RAILWAY_PROJECT_ID }} --service backend --json
+          railway variable set ENGAGEFLOW_DEBUG=0 --service backend
           echo "Railway PROD vars updated."
