@@ -275,3 +275,21 @@ Verification: curl https://engageflow-dev.up.railway.app/activity?limit=1 — ti
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #13 — /debug/runtime + canonical DEV pairing (H1 proved)
+
+Date: 2026-03-04
+Change: Proved H1 (ENV/DB mismatch): Railway DEV and VPS return different activity IDs. Added GET /debug/runtime (ENGAGEFLOW_DEBUG=1) for db_path, engine_running, newest_activity_timestamp, newest_queue_scheduledFor. Documented canonical DEV pairing: Option A Railway, Option B VPS.
+Files:
+- backend/app.py (ENGAGEFLOW_DEBUG, /debug/runtime)
+- backend/tests/test_debug_runtime.py
+- docs/PROJECT_STATE.md
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v (20 passed)
+Verification: ENGAGEFLOW_DEBUG=1 and curl /debug/runtime
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

@@ -128,12 +128,15 @@ The system is considered healthy when:
 - **DB path:** `ENGAGEFLOW_DB_PATH=/data/engageflow.db` (Railway volume). If not set, backend uses repo default.
 - **TDD:** backend/tests/test_health_automation.py — test_health_running_false_when_disabled, test_health_running_true_when_scheduler_started, test_activity_updates_when_action_executes.
 
-## Activity Timeline "19 hr ago" Root Cause (2026-03-04)
+## Activity Timeline "19 hr ago" Root Cause (2026-03-04) — PROVED
 
-- **Symptom:** UI shows "19 hr ago" even when automation comments now.
-- **Root cause:** DB/environment mismatch. Railway DEV backend reads from `/data/engageflow.db`; automation was NOT running on Railway (health.running=false). If automation runs on VPS, it writes to `/root/engageflow-shared/engageflow.db` — different DB.
-- **Fix:** Run automation on Railway DEV: set `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`, and OpenAI API key in Railway Variables. Then activity_feed writes go to same DB the API reads.
-- **Defensive:** Backend now normalizes activity timestamps (append Z when no timezone) so frontend parseISO works correctly. backend/tests/test_activity_timestamp.py.
+- **Symptom:** UI shows "19 hr ago" even when automation comments now; queue/countdown show upcoming actions.
+- **Root cause (H1 ENV/DB mismatch):** Railway DEV and Dev VPS return different activity data (different IDs). Railway reads `/data/engageflow.db`; VPS reads `/root/engageflow-shared/engageflow.db`. Automation runs on one env, UI reads from another.
+- **Canonical DEV pairing (no ambiguity):**
+  - **Option A (preferred):** Railway DEV UI + Railway DEV backend. Set `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`, OpenAI key. Engine runs in Railway, writes to same DB.
+  - **Option B:** Dev VPS UI + Dev VPS backend. Frontend at http://72.61.147.80:3001 uses /api proxy to same-host backend. Engine runs on VPS, writes to `/root/engageflow-shared/engageflow.db`.
+- **Proof signal:** `GET /debug/runtime` (requires `ENGAGEFLOW_DEBUG=1`) returns db_path, db_file_exists, engine_running, newest_activity_timestamp, newest_queue_scheduledFor. Use to verify no guessing.
+- **Defensive:** Backend normalizes activity timestamps (append Z when no timezone). backend/tests/test_activity_timestamp.py, test_debug_runtime.py.
 
 ## Next Actions (max 10)
 

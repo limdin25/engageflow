@@ -62,6 +62,7 @@ except Exception:
 
 DB_PATH = Path(os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db")))
 ENGAGEFLOW_AUTOMATION_ENABLED = str(os.environ.get("ENGAGEFLOW_AUTOMATION_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+ENGAGEFLOW_DEBUG = str(os.environ.get("ENGAGEFLOW_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
@@ -344,6 +345,41 @@ async def health(request: Request):
     except Exception:
         running = False
     return {"status": "ok", "running": running}
+
+
+@app.get("/debug/runtime")
+async def debug_runtime(request: Request):
+    """DEV-only: runtime diagnostics to prevent future DB/env guessing. Requires ENGAGEFLOW_DEBUG=1."""
+    if not ENGAGEFLOW_DEBUG:
+        raise HTTPException(404, "Not found")
+    db_path = str(DB_PATH)
+    db_exists = DB_PATH.exists()
+    db_size = DB_PATH.stat().st_size if db_exists else 0
+    engine_running = False
+    try:
+        engine = getattr(request.app.state, "automation_engine", None)
+        if engine:
+            status = await engine.get_status()
+            engine_running = bool((status or {}).get("isRunning"))
+    except Exception:
+        pass
+    with get_db() as db:
+        newest_activity = db.execute(
+            "SELECT timestamp, profile, action FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        newest_queue = db.execute(
+            "SELECT scheduledFor, profile, community FROM queue_items ORDER BY scheduledFor ASC LIMIT 1"
+        ).fetchone()
+    from datetime import datetime, timezone
+    return {
+        "db_path": db_path,
+        "db_file_exists": db_exists,
+        "db_size": db_size,
+        "engine_running": engine_running,
+        "now_utc": datetime.now(timezone.utc).isoformat(),
+        "newest_activity_timestamp": newest_activity["timestamp"] if newest_activity else None,
+        "newest_queue_scheduledFor": newest_queue["scheduledFor"] if newest_queue else None,
+    }
 
 
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
