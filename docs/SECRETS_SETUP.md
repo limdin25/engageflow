@@ -1,13 +1,11 @@
 # Railway Secrets — Add to GitHub
 
-**One-time setup.** Add these to GitHub repo → Settings → Secrets and variables → Actions:
+**One-time setup.** Add these to GitHub repo → Settings → Secrets and variables → Actions.
 
-| Secret Name         | Value |
-|---------------------|-------|
-| RAILWAY_TOKEN       | `8ba7616a-c9e4-4982-9d92-abd7cc44ed7f` (dev) — **rotate after setup** |
-| RAILWAY_PROJECT_ID  | `f2cddd1a-3d44-47f6-bd18-5ce566b88da4` |
+Values are in `.railway-secrets` (gitignored). Copy from there:
 
-1. New repository secret → Name: `RAILWAY_TOKEN` → Value: `8ba7616a-c9e4-4982-9d92-abd7cc44ed7f`
-2. New repository secret → Name: `RAILWAY_PROJECT_ID` → Value: `f2cddd1a-3d44-47f6-bd18-5ce566b88da4`
+1. `RAILWAY_TOKEN` — dev (push to dev)
+2. `RAILWAY_TOKEN_PROD` — production (push to main)
+3. `RAILWAY_PROJECT_ID` — project ID
 
-**Rotate tokens later** in Railway → Settings → Tokens, then update GitHub Secrets. Delete this file or remove token from it after setup.
+**Rotate tokens later** in Railway → Settings → Tokens, then update GitHub Secrets. Delete `.railway-secrets` after setup.

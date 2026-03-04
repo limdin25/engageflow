@@ -179,13 +179,13 @@ On VPS: set `ENGAGEFLOW_AUTOMATION_ENABLED=0` in docker-compose, then `docker co
 
 ## Railway Autonomy (2026-03-04)
 
-- **Workflow:** `.github/workflows/railway.yml` — on push to dev, sets `ENGAGEFLOW_DEBUG=1` via Railway CLI.
+- **Workflow:** `.github/workflows/railway.yml` — on push to dev sets `ENGAGEFLOW_DEBUG=1`; on push to main sets `ENGAGEFLOW_DEBUG=0` (production).
 - **Endpoint:** `GET /debug/logs` — last 100 log lines (gated by `ENGAGEFLOW_DEBUG=1`).
-- **Secrets:** Add `RAILWAY_TOKEN` and `RAILWAY_PROJECT_ID` to GitHub Secrets. See `docs/SECRETS_SETUP.md`. Values in `.railway-secrets` (gitignored).
+- **Secrets:** `RAILWAY_TOKEN` (dev), `RAILWAY_TOKEN_PROD` (main), `RAILWAY_PROJECT_ID`. See `docs/SECRETS_SETUP.md`.
 
 ## Next Actions (max 10)
 
-1. Add RAILWAY_TOKEN and RAILWAY_PROJECT_ID to GitHub Secrets (from .railway-secrets).
+1. Add `RAILWAY_TOKEN_PROD` to GitHub Secrets (production token for main branch).
 2. Set Railway DEV Variables: `ENGAGEFLOW_AUTOMATION_ENABLED=1`, `ENGAGEFLOW_DB_PATH=/data/engageflow.db`.
 2. Verify profile rotation with 2+ profiles in production.
 3. Verify activity timeline shows rows for all active profiles.

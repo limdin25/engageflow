@@ -365,3 +365,16 @@ Verification: Add RAILWAY_TOKEN + RAILWAY_PROJECT_ID to GitHub Secrets; workflow
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #18 — Railway autonomy: main branch (production)
+
+Date: 2026-03-04
+Change: Added railway-main job for push to main. Uses RAILWAY_TOKEN_PROD, sets ENGAGEFLOW_DEBUG=0. workflow_dispatch with target choice (dev/main).
+Files: .github/workflows/railway.yml, docs/SECRETS_SETUP.md, docs/PROJECT_STATE.md
+Tests: None
+Verification: Add RAILWAY_TOKEN_PROD to GitHub Secrets; push to main triggers production job.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
