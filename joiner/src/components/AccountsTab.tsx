@@ -34,13 +34,13 @@ function mapAuthStatus(p: any): string {
   if (p.auth_status === 'connecting') return 'Connecting';
   if (p.auth_status === 'expired') return 'Expired';
   if (p.auth_status === 'error') return 'Error';
-  if (!p.cookie_json) return 'Missing Cookies';
+  if (!(p.has_cookie_json ?? p.cookie_json)) return 'Missing Cookies';
   return 'Disconnected';
 }
 
 function mapRunStatus(p: any): string {
   if (p.is_running) return 'Running';
-  if (!p.cookie_json) return 'Blocked';
+  if (!(p.has_cookie_json ?? p.cookie_json)) return 'Blocked';
   return 'Idle';
 }
 
@@ -497,7 +497,7 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
                                   </Button>
                                 </div>
                                 {revealCookies === p.id && (
-                                  <code className="mt-1 block text-xs bg-muted p-2 rounded break-all max-h-24 overflow-auto">{p.cookie_json || 'No cookies'}</code>
+                                  <code className="mt-1 block text-xs bg-muted p-2 rounded break-all max-h-24 overflow-auto">{p.has_cookie_json ? 'Cookies present (hidden for security)' : 'No cookies'}</code>
                                 )}
                               </div>
                             </div>

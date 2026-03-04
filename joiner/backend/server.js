@@ -90,9 +90,83 @@ function updateProfileState(profileId, fields) {
 const activeRunners = new Map();
 let lastFetchResults = {};
 
+// ==================== COOKIE SYNC (Railway only) ====================
+async function syncCookiesFromEngageFlow() {
+  const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
+  const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
+  if (!baseUrl || !secret) return { synced: 0, skipped: 'missing env' };
+  const profiles = engageflowDb.prepare('SELECT id, cookie_json FROM profiles').all();
+  if (profiles.length === 0) return { synced: 0, skipped: 'no profiles' };
+  const CONCURRENCY = 3;
+  const TIMEOUT_MS = 10000;
+  let synced = 0;
+  for (let i = 0; i < profiles.length; i += CONCURRENCY) {
+    const batch = profiles.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(batch.map(async (p) => {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+        const res = await fetch(`${baseUrl}/internal/joiner/profiles/${p.id}/cookie`, {
+          headers: { 'X-JOINER-SECRET': secret },
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        if (res.status !== 200) return { id: p.id, ok: false };
+        const data = await res.json();
+        const remote = (data.cookie_json || '').trim() || null;
+        const local = (p.cookie_json || '').trim() || null;
+        if (remote && remote !== local) {
+          engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(remote, p.id);
+          return { id: p.id, ok: true, updated: true };
+        }
+        return { id: p.id, ok: true, updated: false };
+      } catch (err) {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+          const res = await fetch(`${baseUrl}/internal/joiner/profiles/${p.id}/cookie`, {
+            headers: { 'X-JOINER-SECRET': secret },
+            signal: ctrl.signal,
+          });
+          clearTimeout(t);
+          if (res.status !== 200) return { id: p.id, ok: false };
+          const data = await res.json();
+          const remote = (data.cookie_json || '').trim() || null;
+          const local = (p.cookie_json || '').trim() || null;
+          if (remote && remote !== local) {
+            engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(remote, p.id);
+            return { id: p.id, ok: true, updated: true };
+          }
+          return { id: p.id, ok: true, updated: false };
+        } catch {
+          return { id: p.id, ok: false };
+        }
+      }
+    }));
+    synced += results.filter(r => r.updated).length;
+  }
+  if (synced > 0) console.log('[cookie-sync] Synced cookies for', synced, 'profile(s) from EngageFlow');
+  return { synced };
+}
+
 // ==================== ROOT / HEALTH ====================
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'joiner', api: '/api/profiles' });
+});
+
+// ==================== INTERNAL SYNC (secret-gated) ====================
+app.post('/internal/joiner/sync-cookies', async (req, res) => {
+  const secret = (req.headers['x-joiner-secret'] || '').trim();
+  const expected = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET || '';
+  if (!expected || secret !== expected) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const result = await syncCookiesFromEngageFlow();
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
 });
 
 // ==================== DEBUG (Railway-only, ENGAGEFLOW_DEBUG=1) ====================
@@ -139,8 +213,9 @@ app.get('/api/profiles', (req, res) => {
     const hasCookies = !!(p.cookie_json && String(p.cookie_json).trim());
     const authError = state.auth_error || null;
     const authStatus = hasCookies ? (authError ? 'expired' : 'connected') : 'disconnected';
+    const { cookie_json, ...rest } = p;
     return {
-      ...p,
+      ...rest,
       auth_status: authStatus,
       auth_error: authError,
       daily_count: state.daily_count || 0,
@@ -155,8 +230,9 @@ app.get('/api/profiles', (req, res) => {
       password_plain: state.password_plain || null,
       queue_total: queueTotal,
       joined_count: joinedCount,
-      auth_method: p.cookie_json ? 'cookies' : 'none',
-      created_at: null, // Not available in EngageFlow profiles
+      auth_method: hasCookies ? 'cookies' : 'none',
+      has_cookie_json: hasCookies,
+      created_at: null,
     };
   });
   res.json(result);
@@ -897,4 +973,11 @@ cron.schedule('0 8,20 * * *', async () => {
 
 app.listen(PORT, () => {
   console.log(`EngageFlow Joiner backend running on port ${PORT}`);
+  if (process.env.RAILWAY === 'true') {
+    syncCookiesFromEngageFlow().then((r) => {
+      if (r.skipped !== 'missing env' && r.synced !== undefined) {
+        console.log('[cookie-sync] Startup sync:', r.synced, 'profile(s) updated');
+      }
+    }).catch((e) => console.warn('[cookie-sync] Startup sync failed:', e.message));
+  }
 });
