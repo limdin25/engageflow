@@ -1,0 +1,5 @@
+# Database files — do not commit; use Railway volume for persistence
+*.db
+*.db-shm
+*.db-wal
+*.db.corrupted

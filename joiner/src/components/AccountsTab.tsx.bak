@@ -1,0 +1,443 @@
+import { useState, useEffect, useCallback } from "react";
+import { Plus, Upload, TestTube, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Play, Square, Settings2, Timer, Plug, Trash2, Cookie, Download } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { StatusBadge } from "@/components/StatusBadge";
+import { api } from "@/lib/api";
+
+interface AccountsTabProps {
+  onFilterLogs?: (account: string) => void;
+}
+
+function mapAuthStatus(p: any): string {
+  if (p.auth_status === 'connected') return 'Connected';
+  if (p.auth_status === 'connecting') return 'Connecting';
+  if (p.auth_status === 'expired') return 'Expired';
+  if (p.auth_status === 'error') return 'Error';
+  if (!p.cookie_json) return 'Missing Cookies';
+  return 'Disconnected';
+}
+
+function mapRunStatus(p: any): string {
+  if (p.is_running) return 'Running';
+  if (!p.cookie_json) return 'Blocked';
+  return 'Idle';
+}
+
+function formatCountdown(nextActionAt: string | null, isRunning: boolean): string {
+  if (!isRunning) return '—';
+  if (!nextActionAt) return 'Working...';
+  const diff = Math.max(0, Math.floor((new Date(nextActionAt).getTime() - Date.now()) / 1000));
+  if (diff <= 0) return 'Working...';
+  const mins = Math.floor(diff / 60);
+  const secs = diff % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function timeAgo(ts: string | null): string {
+  if (!ts) return 'Never';
+  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [queueStats, setQueueStats] = useState<Record<string, any>>({});
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showCookieModal, setShowCookieModal] = useState<string | null>(null);
+  const [cookiePaste, setCookiePaste] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [revealCookies, setRevealCookies] = useState<string | null>(null);
+  const [csvContent, setCsvContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [fetchingId, setFetchingId] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState<{ status: string; current: number; total: number; community: string } | null>(null);
+
+  const [newAccount, setNewAccount] = useState({ email: '', password: '', proxy: '', dailyCap: 20, cookies: '' });
+
+  const fetchProfiles = useCallback(async () => {
+    try {
+      const data = await api.getProfiles();
+      setProfiles(data);
+      // Fetch queue stats
+      const stats: Record<string, any> = {};
+      for (const p of data) {
+        try { stats[p.id] = await api.getQueueStats(p.id); } catch {}
+      }
+      setQueueStats(stats);
+    } catch (err) { console.error('Failed to fetch profiles:', err); }
+  }, []);
+
+  useEffect(() => { fetchProfiles(); }, [fetchProfiles]);
+
+  // Auto-refresh every 5 seconds for countdown updates
+  useEffect(() => {
+    const iv = setInterval(fetchProfiles, 5000);
+    return () => clearInterval(iv);
+  }, [fetchProfiles]);
+
+  const handleAdd = async () => {
+    setLoading(true);
+    try {
+      await api.createProfile({
+        email: newAccount.email,
+        password: newAccount.password,
+        proxy: newAccount.proxy || undefined,
+        daily_cap: newAccount.dailyCap,
+        cookie_json: newAccount.cookies || undefined,
+      });
+      setNewAccount({ email: '', password: '', proxy: '', dailyCap: 20, cookies: '' });
+      setShowAddModal(false);
+      fetchProfiles();
+    } catch (err: any) { alert(err.message); }
+    setLoading(false);
+  };
+
+  const handleImportCsv = async () => {
+    setLoading(true);
+    try {
+      const result = await api.importCsv(csvContent);
+      alert(`Imported: ${result.results.filter((r: any) => r.success).length} success, ${result.results.filter((r: any) => !r.success).length} failed`);
+      setCsvContent('');
+      setShowImportModal(false);
+      fetchProfiles();
+    } catch (err: any) { alert(err.message); }
+    setLoading(false);
+  };
+
+  const handleTestAuth = async (id: string) => {
+    try {
+      const result = await api.testAuth(id);
+      alert(result.valid ? '✓ Auth valid' : `✗ Auth failed: ${result.error}`);
+      fetchProfiles();
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const handleConnect = async (p: any) => {
+    const password = prompt('Enter Skool password:', '');
+    if (!password) return;
+    try {
+      await api.connect(p.id, { email: p.email, password });
+      fetchProfiles();
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const handlePasteCookies = async (id: string) => {
+    if (!cookiePaste.trim()) return;
+    setLoading(true);
+    try {
+      await api.pasteCookies(id, cookiePaste.trim());
+      setShowCookieModal(null);
+      setCookiePaste('');
+      fetchProfiles();
+      alert('✓ Cookies validated and stored!');
+    } catch (err: any) { alert(`✗ ${err.message}`); }
+    setLoading(false);
+  };
+
+  const handleStartStop = async (p: any) => {
+    try {
+      if (p.is_running) { await api.stopRunner(p.id); }
+      else { await api.startRunner(p.id); }
+      fetchProfiles();
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this account?')) return;
+    await api.deleteProfile(id);
+    fetchProfiles();
+  };
+
+  const handleUpdateSettings = async (id: string, settings: { join_delay_seconds?: number; max_joins_per_run?: number; daily_cap?: number }) => {
+    await api.updateSettings(id, settings);
+    fetchProfiles();
+  };
+
+  const handleFetch = async (id: string) => {
+    setFetchingId(id);
+    setFetchProgress({ status: 'Starting...', current: 0, total: 0, community: '' });
+    try {
+      await api.fetchFromSkool(id);
+      const poll = async () => {
+        const s = await api.getFetchStatus(id);
+        setFetchProgress({ status: s.status, current: s.current, total: s.total, community: s.community || '' });
+        if (s.running) setTimeout(poll, 800);
+        else {
+          fetchProfiles();
+          setFetchingId(null);
+          setFetchProgress(null);
+          alert(`Fetch complete. ${s.resolved || 0} queue items updated to Joined. Found ${s.joinedCount || 0} joined, ${s.pendingCount || 0} pending on Skool.`);
+        }
+      };
+      setTimeout(poll, 500);
+    } catch (e: any) {
+      alert(e.message);
+      setFetchingId(null);
+      setFetchProgress(null);
+    }
+  };
+
+  return (
+    <TooltipProvider>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">Accounts</h2>
+            <p className="text-sm text-muted-foreground">Manage connected Skool accounts</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowImportModal(true)}>
+              <Upload className="h-4 w-4" /> Import CSV
+            </Button>
+            <Button size="sm" className="gap-2" onClick={() => setShowAddModal(true)}>
+              <Plus className="h-4 w-4" /> Add Account
+            </Button>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/50">
+                <TableHead>Account</TableHead>
+                <TableHead>Proxy</TableHead>
+                <TableHead>Auth</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Last Action</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {profiles.length === 0 && (
+                <TableRow><TableCell colSpan={6} className="text-center py-8 text-muted-foreground">No accounts yet. Add one to get started.</TableCell></TableRow>
+              )}
+              {profiles.map((p) => {
+                const status = mapAuthStatus(p);
+                const runStatus = mapRunStatus(p);
+                const stats = queueStats[p.id] || { queued: 0, joined: 0, pending: 0, failed: 0, skipped_paid: 0, survey_submitted: 0 };
+                return (
+                  <>
+                    <TableRow key={p.id} className="group">
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{p.email}</span>
+                          {p.is_running ? <StatusBadge status="Running" /> : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-sm">{p.proxy || '—'}</TableCell>
+                      <TableCell className="text-sm">{p.auth_method || 'none'}</TableCell>
+                      <TableCell><StatusBadge status={status} /></TableCell>
+                      <TableCell>
+                        <button className="text-sm text-primary hover:underline cursor-pointer bg-transparent border-none p-0"
+                          onClick={() => onFilterLogs?.(p.email)}>
+                          {p.last_action_at ? timeAgo(p.last_action_at) : 'Never'}
+                        </button>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip><TooltipTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-7 text-xs gap-1" onClick={() => handleTestAuth(p.id)}>
+                              <TestTube className="h-3 w-3" /> Test Auth
+                            </Button>
+                          </TooltipTrigger><TooltipContent><p>Tests cookies via GET /self</p></TooltipContent></Tooltip>
+                          {status !== 'Connected' && (
+                            <>
+                              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1" onClick={() => { setShowCookieModal(p.id); setCookiePaste(''); }}>
+                                <Cookie className="h-3 w-3" /> Paste Cookies
+                              </Button>
+                              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1" onClick={() => handleConnect(p)}>
+                                <Plug className="h-3 w-3" /> Connect
+                              </Button>
+                            </>
+                          )}
+                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setExpandedId(expandedId === p.id ? null : p.id)}>
+                            {expandedId === p.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    {expandedId === p.id && (
+                      <TableRow key={`${p.id}-exp`}>
+                        <TableCell colSpan={6} className="bg-muted/30 p-4">
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+                            {/* Last Error */}
+                            <div>
+                              <span className="text-muted-foreground">Last Error</span>
+                              <p className="mt-1 font-medium text-destructive">{p.auth_error || p.last_auth_error || 'None'}</p>
+                            </div>
+                            {/* Queue Stats */}
+                            <div>
+                              <span className="text-muted-foreground">Queue Stats</span>
+                              <p className="mt-1 space-x-2">
+                                <span className="text-muted-foreground font-medium">{stats.queued} Queued</span>
+                                <span className="text-green-500 font-medium">{stats.joined} Joined</span>
+                                <span className="text-yellow-500 font-medium">{stats.pending} Pending</span>
+                                <span className="text-red-500 font-medium">{stats.failed} Failed</span>
+                                {stats.skipped_paid > 0 && <span className="text-orange-500 font-medium">{stats.skipped_paid} Skipped</span>}
+                              </p>
+                            </div>
+                            {/* Run Controls */}
+                            <div>
+                              <span className="text-muted-foreground">Run Controls</span>
+                              <div className="mt-1 flex flex-col gap-2">
+                                <div className="flex items-center gap-2">
+                                  {p.is_running ? (
+                                    <Button variant="destructive" size="sm" className="h-7 text-xs gap-1" onClick={() => handleStartStop(p)}>
+                                      <Square className="h-3 w-3" /> Stop
+                                    </Button>
+                                  ) : (
+                                    <Button size="sm" className="h-7 text-xs gap-1" disabled={status !== 'Connected'} onClick={() => handleStartStop(p)}>
+                                      <Play className="h-3 w-3" /> Start
+                                    </Button>
+                                  )}
+                                  <Popover>
+                                    <PopoverTrigger asChild>
+                                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1">
+                                        <Settings2 className="h-3 w-3" /> Delays
+                                      </Button>
+                                    </PopoverTrigger>
+                                    <PopoverContent className="w-56" align="start">
+                                      <div className="space-y-3">
+                                        <div>
+                                          <Label className="text-xs text-muted-foreground">Max joins per day</Label>
+                                          <Input type="number" min={1} max={200} defaultValue={p.daily_cap || 20}
+                                            onBlur={(e) => handleUpdateSettings(p.id, { daily_cap: Number(e.target.value) })} className="mt-1" />
+                                        </div>
+                                        <div>
+                                          <Label className="text-xs text-muted-foreground">Delay between joins (sec)</Label>
+                                          <Input type="number" min={0} defaultValue={p.join_delay_seconds || 30}
+                                            onBlur={(e) => handleUpdateSettings(p.id, { join_delay_seconds: Number(e.target.value) })} className="mt-1" />
+                                        </div>
+                                      </div>
+                                    </PopoverContent>
+                                  </Popover>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  <Tooltip><TooltipTrigger asChild>
+                                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1 w-fit" disabled={status !== 'Connected' || !!fetchingId}
+                                      onClick={() => handleFetch(p.id)}>
+                                      <Download className="h-3 w-3" /> {fetchingId === p.id ? 'Fetching...' : 'Fetch'}
+                                    </Button>
+                                  </TooltipTrigger><TooltipContent><p>Sync from Skool settings — updates Joined/Pending from skool.com/settings?t=communities</p></TooltipContent></Tooltip>
+                                  {fetchingId === p.id && fetchProgress && (
+                                    <p className="text-xs text-muted-foreground">
+                                      {fetchProgress.status}
+                                      {fetchProgress.total > 0 && ` (${fetchProgress.current}/${fetchProgress.total})`}
+                                      {fetchProgress.community && ` — ${fetchProgress.community}`}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            {/* Countdown + Cookies */}
+                            <div className="space-y-3">
+                              <div>
+                                <span className="text-muted-foreground flex items-center gap-1"><Timer className="h-3 w-3" /> Next Action</span>
+                                <p className="mt-1 font-mono font-medium">{formatCountdown(p.next_action_at, p.is_running)}</p>
+                              </div>
+                              <div>
+                                <span className="text-muted-foreground">Cookies</span>
+                                <div className="mt-1">
+                                  <Button variant="ghost" size="sm" className="h-6 text-xs gap-1 p-0"
+                                    onClick={() => setRevealCookies(revealCookies === p.id ? null : p.id)}>
+                                    {revealCookies === p.id ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                                    {revealCookies === p.id ? 'Hide' : 'Reveal'}
+                                  </Button>
+                                </div>
+                                {revealCookies === p.id && (
+                                  <code className="mt-1 block text-xs bg-muted p-2 rounded break-all max-h-24 overflow-auto">{p.cookie_json || 'No cookies'}</code>
+                                )}
+                              </div>
+                            </div>
+                            {/* Delete */}
+                            <div>
+                              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 text-destructive" onClick={() => handleDelete(p.id)}>
+                                <Trash2 className="h-3 w-3" /> Delete Account
+                              </Button>
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+
+        {/* Add Account Modal */}
+        <Dialog open={showAddModal} onOpenChange={setShowAddModal}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Add Account</DialogTitle></DialogHeader>
+            <div className="space-y-4">
+              <div><Label>Email *</Label><Input placeholder="your@email.com" value={newAccount.email} onChange={(e) => setNewAccount({...newAccount, email: e.target.value})} /></div>
+              <div><Label>Password *</Label><Input type="password" placeholder="Skool password" value={newAccount.password} onChange={(e) => setNewAccount({...newAccount, password: e.target.value})} /></div>
+              <div><Label>Proxy <span className="text-muted-foreground">(optional)</span></Label><Input placeholder="host:port:user:pass" value={newAccount.proxy} onChange={(e) => setNewAccount({...newAccount, proxy: e.target.value})} /></div>
+              <div><Label>Daily Cap</Label><Input type="number" value={newAccount.dailyCap} onChange={(e) => setNewAccount({...newAccount, dailyCap: Number(e.target.value)})} /></div>
+              <div><Label>Cookies JSON <span className="text-muted-foreground">(optional — auto-connects if empty)</span></Label>
+                <Textarea placeholder='[{"name":"auth","value":"..."}]' rows={3} value={newAccount.cookies} onChange={(e) => setNewAccount({...newAccount, cookies: e.target.value})} /></div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowAddModal(false)}>Cancel</Button>
+              <Button onClick={handleAdd} disabled={loading || !newAccount.email || !newAccount.password}>{loading ? 'Adding...' : 'Add Account'}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Paste Cookies Modal */}
+        <Dialog open={!!showCookieModal} onOpenChange={(open) => { if (!open) setShowCookieModal(null); }}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Paste Cookies</DialogTitle></DialogHeader>
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Log into <a href="https://www.skool.com" target="_blank" className="text-primary underline">skool.com</a> in your browser, then copy cookies using a browser extension (e.g. EditThisCookie, Cookie-Editor).
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Accepts: JSON array from cookie extension, or raw cookie header string (name=val; name2=val2)
+              </p>
+              <Textarea
+                rows={8}
+                placeholder={'Paste cookies here...\n\nJSON: [{"name":"auth","value":"...","domain":".skool.com"}]\n\nor raw: cookie_name=value; another=value'}
+                value={cookiePaste}
+                onChange={(e) => setCookiePaste(e.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowCookieModal(null)}>Cancel</Button>
+              <Button onClick={() => handlePasteCookies(showCookieModal!)} disabled={loading || !cookiePaste.trim()}>
+                {loading ? 'Validating...' : 'Validate & Save'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Import CSV Modal */}
+        <Dialog open={showImportModal} onOpenChange={setShowImportModal}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Import Accounts via CSV</DialogTitle></DialogHeader>
+            <div className="space-y-4">
+              <p className="text-xs text-muted-foreground">Columns: email, password, proxy, daily_cap, cookie_json</p>
+              <Textarea rows={8} placeholder="email,password,proxy,daily_cap&#10;john@test.com,pass123,," value={csvContent} onChange={(e) => setCsvContent(e.target.value)} />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowImportModal(false)}>Cancel</Button>
+              <Button onClick={handleImportCsv} disabled={loading || !csvContent}>{loading ? 'Importing...' : 'Import'}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </TooltipProvider>
+  );
+}

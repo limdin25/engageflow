@@ -1,0 +1,9 @@
+node_modules
+*.db
+*.db-shm
+*.db-wal
+*.db.corrupted
+debug_screenshots
+*.log
+.git
+.gitignore
