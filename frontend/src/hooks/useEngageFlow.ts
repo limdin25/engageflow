@@ -70,7 +70,7 @@ export const useLogs = () =>
 export const useActivity = () =>
   useQuery({
     queryKey: ["activity"],
-    queryFn: () => api.getActivity(100),
+    queryFn: () => api.getActivity(500),
     refetchInterval: 5000,
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: false,
