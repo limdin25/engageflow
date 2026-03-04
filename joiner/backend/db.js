@@ -14,6 +14,9 @@ if (!fs.existsSync(engageflowDir)) {
 const engageflowDb = new Database(engageflowPath, {
     readonly: false  // Need write access for browser_locks only
 });
+engageflowDb.pragma('journal_mode = WAL');
+engageflowDb.pragma('synchronous = NORMAL');
+engageflowDb.pragma('busy_timeout = 5000');
 
 // Bootstrap: create profiles + browser_locks if missing (Railway empty DB)
 engageflowDb.exec(`

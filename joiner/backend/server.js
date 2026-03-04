@@ -95,6 +95,35 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'joiner', api: '/api/profiles' });
 });
 
+// ==================== DEBUG (Railway-only, ENGAGEFLOW_DEBUG=1) ====================
+if (process.env.ENGAGEFLOW_DEBUG === '1') {
+  app.get('/debug/dbinfo', (req, res) => {
+    try {
+      const fs = require('fs');
+      const dbPath = config.ENGAGEFLOW_DB_PATH;
+      const size = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+      let profilesCount = 0;
+      let profilesWithCookieJson = 0;
+      if (fs.existsSync(dbPath) && size > 0) {
+        const r = engageflowDb.prepare('SELECT COUNT(*) as c FROM profiles').get();
+        profilesCount = r?.c ?? 0;
+        const r2 = engageflowDb.prepare(
+          "SELECT COUNT(*) as c FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
+        ).get();
+        profilesWithCookieJson = r2?.c ?? 0;
+      }
+      res.json({
+        db_path: dbPath,
+        file_size_bytes: size,
+        profiles_count: profilesCount,
+        profiles_with_cookie_json: profilesWithCookieJson,
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e.message) });
+    }
+  });
+}
+
 // ==================== PROFILES (read from EngageFlow) ====================
 app.get('/api/profiles', (req, res) => {
   const profiles = engageflowDb.prepare(`
