@@ -760,3 +760,21 @@ Reason: User asked "did you copy what was working?" — VPS at 38.242.229.161:/r
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #41 — Joiner deployment validation and fingerprint header
+
+Date: 2026-03-04
+Change: (1) Joiner root directory fixed via Railway API (serviceInstanceUpdate rootDirectory: joiner/backend). (2) ENGAGEFLOW_JOINER_SECRET set on Railway Joiner service; sync endpoint validated (POST /internal/joiner/sync-cookies → 200, success/scanned/updated). (3) Deployment fingerprint: server always sends response header X-Joiner-Git-Sha (RAILWAY_GIT_COMMIT_SHA or ENGAGEFLOW_GIT_SHA or "unknown") for version verification.
+Files:
+- joiner/backend/server.js (middleware: always set X-Joiner-Git-Sha)
+- docs/PROJECT_STATE.md (Joiner service section, URL, root dir, sync, fingerprint, ENGAGEFLOW_JOINER_SECRET)
+- docs/PROJECT_HISTORY.md
+
+Reason: Joiner was deploying wrong app (EngageFlow) until root directory set to joiner/backend. After fix: sync endpoint required secret; fingerprint header allows instant deploy verification without logs.
+Tests: Manual: GET / → joiner identity; GET /api/profiles → profiles; POST sync-cookies with secret → 200 + success/scanned/updated.
+Verification: curl -i https://joiner-dev.up.railway.app/ (header X-Joiner-Git-Sha after next deploy); curl -X POST -H "X-JOINER-SECRET: <secret>" https://joiner-dev.up.railway.app/internal/joiner/sync-cookies
+Reversal: git revert HEAD --no-edit (server.js only); Railway vars/deploy unchanged.
+ReversalTested: No
+Risk Level: LOW

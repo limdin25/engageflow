@@ -15,10 +15,10 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3100;
 
-// Version header for deploy proof (Railway sets RAILWAY_GIT_COMMIT_SHA)
+// Deployment fingerprint: always expose commit hash (Railway sets RAILWAY_GIT_COMMIT_SHA)
 app.use((req, res, next) => {
-  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.ENGAGEFLOW_GIT_SHA || '';
-  if (sha) res.setHeader('X-Joiner-Git-Sha', sha);
+  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.ENGAGEFLOW_GIT_SHA || 'unknown';
+  res.setHeader('X-Joiner-Git-Sha', sha);
   next();
 });
 

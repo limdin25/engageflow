@@ -21,7 +21,7 @@ Automation platform for engagement workflows: backend API + automation engine, f
 | DEV | https://selfless-renewal-dev.up.railway.app | https://engageflow-dev.up.railway.app |
 | PROD | https://selfless-renewal-production-9e39.up.railway.app | (same project, production env) |
 
-Project ID: `f2cddd1a-3d44-47f6-bd18-5ce566b88da4`. Services: `engageflow` (backend), `selfless-renewal` (frontend).
+Project ID: `f2cddd1a-3d44-47f6-bd18-5ce566b88da4`. Services: `engageflow` (backend), `selfless-renewal` (frontend), **joiner** (Node, monorepo subpath).
 
 ## System Status
 
@@ -104,6 +104,17 @@ The system is considered healthy when:
 | OPENAI_API_KEY | sk-... | Yes |
 
 Backend MUST have a Volume mounted at `/data`. Redeploy after variable changes.
+
+### Joiner service (DEV)
+
+- **URL:** https://joiner-dev.up.railway.app
+- **Source:** Repo `limdin25/engageflow`, branch `dev`, **Root Directory:** `joiner/backend`, Dockerfile `joiner/backend/Dockerfile`.
+- **Deployment fingerprint:** Response header `X-Joiner-Git-Sha` (commit hash or `unknown`); set from `RAILWAY_GIT_COMMIT_SHA` / `ENGAGEFLOW_GIT_SHA`.
+- **Cookie sync:** `POST /internal/joiner/sync-cookies` with header `X-JOINER-SECRET: <ENGAGEFLOW_JOINER_SECRET>`. Returns `{ success, scanned, updated }`. Validated 2026-03-04 (200, scanned:3, updated:0).
+
+| Variable | Value | Required |
+|----------|-------|----------|
+| ENGAGEFLOW_JOINER_SECRET | Secure random (dev: set in Railway; rotate for prod) | Yes |
 
 ### Railway DEV Variables (selfless-renewal service)
 
