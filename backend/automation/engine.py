@@ -64,6 +64,9 @@ AUTOMATION_FAILURE_DIAGNOSTICS_ENABLED = str(
 ).strip().lower() in {"1", "true", "yes", "on"}
 LOGGER = logging.getLogger("engageflow.automation")
 
+EDITOR_WAIT_TIMEOUT_MS = 25000
+EDITOR_POST_LOAD_DELAY_MS = 3000
+
 SKOOL_SELECTORS = {
     "post_items": 'div[class*="PostItemWrapper"]',
     "post_content": 'div[class*="ContentPreviewWrapper"]',
@@ -2905,7 +2908,7 @@ class AutomationEngine:
                                     "message": f"[SKOOL] WRITING COMMENT task={task_ref} chars={len(ai_reply)}",
                                 }
                             )
-                            editor = self._ensure_comment_editor(page, timeout_ms=15000)
+                            editor = self._ensure_comment_editor(page, timeout_ms=EDITOR_WAIT_TIMEOUT_MS)
                             if not editor:
                                 raise RuntimeError("send_or_dom_error:editor_not_visible")
                             editor.click()
@@ -5057,14 +5060,22 @@ class AutomationEngine:
         except Exception:
             return
 
-    def _ensure_comment_editor(self, page: Any, timeout_ms: int = 15000) -> Optional[Any]:
+    def _ensure_comment_editor(self, page: Any, timeout_ms: Optional[int] = None) -> Optional[Any]:
         # Skool sometimes renders the post but delays/misses mounting the inline editor.
-        # Try to activate the comment composer before giving up on the task.
-        deadline = time.time() + max(4.0, float(timeout_ms) / 1000.0)
+        # Wait for Skool to fully load before first editor check.
+        timeout_ms = timeout_ms if timeout_ms is not None else EDITOR_WAIT_TIMEOUT_MS
+        try:
+            page.wait_for_timeout(EDITOR_POST_LOAD_DELAY_MS)
+        except Exception:
+            pass
         selectors = [
             SKOOL_SELECTORS.get("comment_editor") or 'div[contenteditable="true"].tiptap.ProseMirror',
+            'div.tiptap.ProseMirror[contenteditable="true"]',
+            '[data-placeholder*="comment"][contenteditable="true"]',
             'div[contenteditable="true"]',
+            'textarea[placeholder*="comment"]',
         ]
+        deadline = time.time() + max(4.0, float(timeout_ms) / 1000.0)
         while time.time() < deadline:
             for selector in selectors:
                 if not selector:
@@ -5072,6 +5083,7 @@ class AutomationEngine:
                 try:
                     editor = page.wait_for_selector(selector, timeout=1200, state="visible")
                     if editor:
+                        LOGGER.info("Editor found with selector: %s", selector)
                         return editor
                 except Exception:
                     continue
@@ -5109,6 +5121,25 @@ class AutomationEngine:
                 page.wait_for_timeout(450)
             except Exception:
                 break
+        try:
+            page_state = page.evaluate(
+                """
+                () => {
+                  const editables = document.querySelectorAll('[contenteditable="true"]');
+                  const buttons = Array.from(document.querySelectorAll('button'))
+                    .filter(b => (b.textContent || "").toLowerCase().includes('comment'))
+                    .map(b => (b.textContent || "").trim());
+                  return {
+                    editables_count: editables.length,
+                    comment_buttons: buttons,
+                    url: window.location.href
+                  };
+                }
+                """
+            )
+            LOGGER.warning("Editor not found. Page state: %s", page_state)
+        except Exception:
+            pass
         return None
 
     def _editor_contains_snippet(self, page: Any, snippet: str) -> bool:

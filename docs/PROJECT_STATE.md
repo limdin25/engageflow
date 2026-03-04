@@ -50,6 +50,8 @@ Frontend: React, Vite, React Query, TanStack Router.
 
 **Diagnostics/Start:** db_master_enabled always boolean (never null). POST /api/automation/start accepts no body or {}. Stop has 8s timeout to avoid 502.
 
+**Skool editor:** 3s post-load delay + 25s timeout, 5 selector variants, page-state diagnostics on editor_not_visible.
+
 ## How To Run
 
 **Docker (recommended):**

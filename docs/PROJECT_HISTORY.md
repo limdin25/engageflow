@@ -615,3 +615,20 @@ Verification: /api/diagnostics never null; curl -X POST /api/automation/start (n
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #33 — Skool editor detection: longer wait + robust selectors
+
+Date: 2026-03-04
+Change: Fix editor_not_visible_cooldown. Wait 3s after POST OPENED before editor detection (EDITOR_POST_LOAD_DELAY_MS). Increase timeout from 15s to 25s (EDITOR_WAIT_TIMEOUT_MS). Try 5 selector variants. Log "Editor found with selector" on success. On failure, log page state (editables_count, comment_buttons, url) for debugging.
+Files:
+- backend/automation/engine.py (EDITOR_WAIT_TIMEOUT_MS, EDITOR_POST_LOAD_DELAY_MS, _ensure_comment_editor)
+- backend/tests/test_skool_editor_detection.py (new)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (61 passed)
+Verification: Next automation run completes tasks; activity shows new comments
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
