@@ -430,6 +430,26 @@ def get_automation_engine(request: Request) -> AutomationEngine:
     return request.app.state.automation_engine
 
 
+@app.get("/internal/joiner/profiles/{profile_id}/cookie")
+def internal_joiner_profile_cookie(profile_id: str, request: Request):
+    """Internal: return cookie_json for Joiner sync. Requires X-JOINER-SECRET header. Never logs cookie contents."""
+    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
+    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
+    if not expected or secret != expected:
+        raise HTTPException(401, "Unauthorized")
+    with get_db() as db:
+        row = db.execute(
+            "SELECT cookie_json FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Profile not found")
+    cookie_json = (row["cookie_json"] or "").strip() or None
+    has_cookie = cookie_json is not None and len(cookie_json) > 0
+    LOGGER.info("internal/joiner/cookie profile_id=%s has_cookie=%s", profile_id, has_cookie)
+    return {"cookie_json": cookie_json}
+
+
 @app.get("/health")
 async def health(request: Request):
     """Health check: status=ok, running=engine.is_running."""
