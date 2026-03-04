@@ -69,7 +69,7 @@ LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", 
 LOG_DIR = Path(os.environ.get("ENGAGEFLOW_LOG_DIR", str(Path(__file__).parent / "logs")))
 SKOOL_CHAT_IMPORT_PREFIX = "skool-chat-"
 SKOOL_CHAT_IMPORT_MESSAGE_PREFIX = "skool-msg-"
-SKOOL_CHAT_BACKGROUND_SYNC_ENABLED = str(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+SKOOL_CHAT_BACKGROUND_SYNC_ENABLED = str(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_ENABLED", "1" if ENGAGEFLOW_AUTOMATION_ENABLED else "0")).strip().lower() in {"1", "true", "yes", "on"}
 SKOOL_CHAT_STRICT_IDENTITY_CHECK = str(os.environ.get("SKOOL_CHAT_STRICT_IDENTITY_CHECK", "1")).strip().lower() in {"1", "true", "yes", "on"}
 SKOOL_CHAT_SYNC_TTL_SECONDS = max(120, int(os.environ.get("SKOOL_CHAT_SYNC_TTL_SECONDS", "180")))
 SKOOL_CHAT_BACKGROUND_SYNC_INITIAL_DELAY_SECONDS = max(15, int(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_INITIAL_DELAY_SECONDS", "60")))
@@ -4721,7 +4721,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
         """
         SELECT id, name, proxy, email
         FROM profiles
-        WHERE lower(trim(coalesce(status, ''))) IN ('ready', 'running')
+        WHERE lower(trim(coalesce(status, ''))) IN ('ready', 'running', 'active', 'idle', 'checking')
         ORDER BY name
         """
     ).fetchall()
@@ -6610,6 +6610,8 @@ def read_automation_lifecycle_logs(request: Request, limit: int = 50):
                 state=e.get("state", ""),
                 event=e.get("event", ""),
                 row_count=e.get("row_count"),
+                count=e.get("count"),
+                from_queue=e.get("from_queue"),
                 error=e.get("error"),
             )
             for e in entries

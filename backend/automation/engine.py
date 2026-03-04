@@ -1959,6 +1959,7 @@ class AutomationEngine:
                 limit=max(1, int(profile.get("repliesPerVisit", 1)) * 4),
             ) if not scan_only else []
             result.due_queue_items_seen = len(due_queue_items)
+            self._emit_lifecycle("DUE_QUEUE_ITEMS_LOADED", profile_id=str(profile_id or ""), action_type="", state="loaded", count=len(due_queue_items))
             if not scan_only:
                 self._insert_log(
                     {
@@ -2484,6 +2485,7 @@ class AutomationEngine:
                     )
 
                 if not scan_only:
+                    self._emit_lifecycle("ELIGIBLE_POSTS_BUILT", profile_id=str(profile_id or ""), action_type="", state="built", count=len(eligible_posts), from_queue=sum(1 for p in eligible_posts if p.get("from_queue")))
                     comment_posted = False
                     removed_due_existing_comment = 0
 
