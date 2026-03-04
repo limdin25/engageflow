@@ -15,6 +15,13 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3100;
 
+// Version header for deploy proof (Railway sets RAILWAY_GIT_COMMIT_SHA)
+app.use((req, res, next) => {
+  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.ENGAGEFLOW_GIT_SHA || '';
+  if (sha) res.setHeader('X-Joiner-Git-Sha', sha);
+  next();
+});
+
 // ==================== HELPERS ====================
 function getSetting(key) {
   const row = joinerDb.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -191,6 +198,21 @@ app.post('/internal/joiner/sync-cookies', async (req, res) => {
 
 // ==================== DEBUG (Railway-only, ENGAGEFLOW_DEBUG=1) ====================
 if (process.env.ENGAGEFLOW_DEBUG === '1') {
+  app.get('/debug/routes', (req, res) => {
+    const routes = [];
+    try {
+      const stack = app._router?.stack || [];
+      stack.forEach((layer) => {
+        if (layer.route) {
+          const methods = Object.keys(layer.route.methods).filter(m => layer.route.methods[m]);
+          methods.forEach(m => routes.push({ method: m.toUpperCase(), path: layer.route.path }));
+        }
+      });
+      res.json({ git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown', routes });
+    } catch (e) {
+      res.status(500).json({ error: String(e.message) });
+    }
+  });
   app.get('/debug/dbinfo', (req, res) => {
     try {
       const fs = require('fs');
