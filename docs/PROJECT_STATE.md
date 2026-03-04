@@ -42,6 +42,8 @@ Working / Partial / Broken
 Backend: FastAPI, SQLite (engageflow.db), automation engine. Automation control routes accept BOTH /automation/* and /api/automation/* (UI may call either).
 Frontend: React, Vite, React Query, TanStack Router.
 
+**Request correlation:** Every request gets a short `request_id` (8-char UUID prefix). Response headers: `X-Request-Id`, `X-EngageFlow-Git-Sha`. Automation control JSON includes `request_id`. On error, frontend toast shows `(request_id: xxx)` so Railway logs can be traced in &lt;1 min.
+
 ## How To Run
 
 **Docker (recommended):**
@@ -121,7 +123,7 @@ curl -sS "https://engageflow-dev.up.railway.app/activity?limit=1"
 # PASS: newest timestamp < 5 min when actions execute
 
 curl -i -X POST https://engageflow-dev.up.railway.app/automation/stop
-# PASS: 200, JSON with isRunning=false (idempotent when already stopped)
+# PASS: 200, JSON with isRunning=false, request_id; header X-Request-Id present (idempotent when already stopped)
 
 curl -sS https://engageflow-dev.up.railway.app/api/diagnostics
 # PASS: JSON with git_sha, build_time_utc, service_name, system_health, database_status, automation_engine_state, last_activity_timestamp, recent_errors, environment_flags

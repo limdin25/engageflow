@@ -528,3 +528,21 @@ Verification: POST /api/automation/stop → 200; GET /api/automation/status → 
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #28 — Request correlation (request_id for Stop toast debugging)
+
+Date: 2026-03-04
+Change: Add request_id per request for correlation. Middleware generates 8-char UUID, sets X-Request-Id and X-EngageFlow-Git-Sha on all responses. Automation control endpoints return request_id in JSON. Log automation control requests as AUTOMATION_CTRL method path status request_id git_sha. Frontend ApiError includes request_id in message when response !ok; toast shows it for traceability.
+Files:
+- backend/app.py (request_id middleware, _with_request_id, automation logging)
+- backend/tests/test_automation_control_contract.py (test_stop_returns_request_id_header, test_stop_returns_request_id_in_json, test_diagnostics_returns_request_id_header)
+- frontend/src/lib/api.ts (ApiError.requestId, X-Request-Id in error path)
+- docs/PROJECT_STATE.md, docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (45 passed)
+Verification: curl -i POST /automation/stop → X-Request-Id header, request_id in JSON; error toast shows request_id
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

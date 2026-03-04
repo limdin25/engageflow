@@ -124,12 +124,15 @@ async function resolveBackendBaseUrl(path: string): Promise<string> {
 export class ApiError extends Error {
   status: number;
   error: string;
+  requestId?: string;
 
-  constructor(status: number, error: string, message: string) {
-    super(message);
+  constructor(status: number, error: string, message: string, requestId?: string) {
+    const displayMessage = requestId ? `${message} (request_id: ${requestId})` : message;
+    super(displayMessage);
     this.name = "ApiError";
     this.status = status;
     this.error = error;
+    this.requestId = requestId;
   }
 }
 
@@ -203,20 +206,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     (text && !payload ? text : "") ||
     `${response.status} ${response.statusText}`;
   const machineError = payload?.error || "request_error";
+  const requestId = response.headers.get("X-Request-Id") ?? undefined;
 
   if (!response.ok) {
-    throw new ApiError(response.status, machineError, message);
+    throw new ApiError(response.status, machineError, message, requestId);
   }
   if (response.status === 204) {
     return undefined as T;
   }
 
   if (payload && payload.success === false) {
-    throw new ApiError(response.status, machineError, message);
+    throw new ApiError(response.status, machineError, message, requestId);
   }
 
   if (parsed === null) {
-    throw new ApiError(response.status, "invalid_response", "Invalid server response");
+    throw new ApiError(response.status, "invalid_response", "Invalid server response", requestId);
   }
 
   return parsed as T;

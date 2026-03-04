@@ -284,28 +284,48 @@ app.add_middleware(
 )
 
 
+def _is_automation_control(path: str) -> bool:
+    """True if path is an automation control endpoint (stop, status, start, pause, resume)."""
+    p = (path or "").lower()
+    return "automation" in p and any(x in p for x in ("/stop", "/status", "/start", "/pause", "/resume"))
+
+
 @app.middleware("http")
-# Log each request with status code and latency for diagnostics.
+# Request correlation + logging. Generates request_id, adds X-Request-Id and X-EngageFlow-Git-Sha headers.
 async def request_logging_middleware(request: Request, call_next):
+    request_id = str(uuid.uuid4())[:8]
+    request.state.request_id = request_id
     started = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - started) * 1000
         LOGGER.exception(
-            "HTTP %s %s -> 500 (%.1fms)",
+            "HTTP %s %s -> 500 (%.1fms) request_id=%s",
             request.method,
             request.url.path,
             elapsed_ms,
+            request_id,
         )
         raise
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     status_code = int(getattr(response, "status_code", 0) or 0)
-    log_fn = LOGGER.warning if status_code >= 400 else LOGGER.info
-    log_fn("HTTP %s %s -> %s (%.1fms)", request.method, request.url.path, status_code, elapsed_ms)
     if hasattr(response, "headers"):
+        response.headers["X-Request-Id"] = request_id
         response.headers["X-EngageFlow-Git-Sha"] = _BUILD_INFO["git_sha"]
+    if _is_automation_control(request.url.path):
+        LOGGER.info(
+            "AUTOMATION_CTRL %s %s -> %s request_id=%s git_sha=%s",
+            request.method,
+            request.url.path,
+            status_code,
+            request_id,
+            _BUILD_INFO["git_sha"][:7],
+        )
+    else:
+        log_fn = LOGGER.warning if status_code >= 400 else LOGGER.info
+        log_fn("HTTP %s %s -> %s (%.1fms)", request.method, request.url.path, status_code, elapsed_ms)
     return response
 
 
@@ -6996,7 +7016,7 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
 async def automation_start(payload: AutomationStartRequest, request: Request):
     engine = get_automation_engine(request)
     try:
-        return await engine.start(payload.profiles, payload.globalSettings)
+        return _with_request_id(request, await engine.start(payload.profiles, payload.globalSettings))
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -7021,14 +7041,20 @@ def _idempotent_stopped_response() -> Dict[str, Any]:
     }
 
 
+def _with_request_id(request: Request, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Add request_id to automation control response for correlation."""
+    rid = getattr(request.state, "request_id", None) or ""
+    return {**data, "request_id": rid}
+
+
 @app.get("/automation/stop")
 @app.get("/api/automation/stop")
 async def automation_stop_get(request: Request):
     """GET returns current status (idempotent). Use POST to actually stop."""
     engine = getattr(request.app.state, "automation_engine", None)
     if engine is None:
-        return _idempotent_stopped_response()
-    return await engine.get_status()
+        return _with_request_id(request, _idempotent_stopped_response())
+    return _with_request_id(request, await engine.get_status())
 
 
 @app.post("/automation/stop")
@@ -7036,9 +7062,9 @@ async def automation_stop_get(request: Request):
 async def automation_stop(request: Request):
     engine = getattr(request.app.state, "automation_engine", None)
     if engine is None:
-        return _idempotent_stopped_response()
+        return _with_request_id(request, _idempotent_stopped_response())
     try:
-        return await engine.stop()
+        return _with_request_id(request, await engine.stop())
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -7046,7 +7072,7 @@ async def automation_stop(request: Request):
         try:
             status = await engine.get_status()
             if not bool((status or {}).get("isRunning")):
-                return status
+                return _with_request_id(request, status)
         except Exception:
             pass
         raise HTTPException(503, f"Stop failed: {exc!s}")
@@ -7057,7 +7083,7 @@ async def automation_stop(request: Request):
 async def automation_pause(request: Request):
     engine = get_automation_engine(request)
     try:
-        return await engine.pause()
+        return _with_request_id(request, await engine.pause())
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
 
@@ -7067,7 +7093,7 @@ async def automation_pause(request: Request):
 async def automation_resume(request: Request):
     engine = get_automation_engine(request)
     try:
-        return await engine.resume()
+        return _with_request_id(request, await engine.resume())
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -7079,7 +7105,7 @@ async def automation_resume(request: Request):
 @app.get("/api/automation/status")
 async def automation_status(request: Request):
     engine = get_automation_engine(request)
-    return await engine.get_status()
+    return _with_request_id(request, await engine.get_status())
 
 
 @app.get("/automation/logs/stream")

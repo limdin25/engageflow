@@ -61,3 +61,27 @@ def test_stop_idempotent_on_prefixed_route(client):
     r2 = client.post("/api/automation/stop")
     assert r2.status_code == 200
     assert r2.json().get("isRunning") is False
+
+
+def test_stop_returns_request_id_header(client):
+    """POST /api/automation/stop returns X-Request-Id header."""
+    r = client.post("/api/automation/stop")
+    assert r.status_code == 200
+    assert "X-Request-Id" in r.headers
+    assert len(r.headers["X-Request-Id"]) >= 8
+
+
+def test_stop_returns_request_id_in_json(client):
+    """POST /api/automation/stop returns request_id in JSON body."""
+    r = client.post("/api/automation/stop")
+    assert r.status_code == 200
+    data = r.json()
+    assert "request_id" in data
+    assert len(data["request_id"]) >= 8
+
+
+def test_diagnostics_returns_request_id_header(client):
+    """GET /api/diagnostics returns X-Request-Id header."""
+    r = client.get("/api/diagnostics")
+    assert r.status_code == 200
+    assert "X-Request-Id" in r.headers
