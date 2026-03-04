@@ -297,6 +297,27 @@ def _is_automation_control(path: str) -> bool:
     return "automation" in p and any(x in p for x in ("/stop", "/status", "/start", "/pause", "/resume"))
 
 
+# Routes defined WITH /api prefix - do not strip (they match as-is)
+_API_PREFIX_ROUTES = frozenset(["/api/diagnostics", "/api/db-status", "/api/logs"])
+
+
+@app.middleware("http")
+async def strip_api_prefix_middleware(request: Request, call_next):
+    """
+    Strip /api prefix from request path for frontend compatibility.
+    Frontend calls /api/*, backend routes are /* (no prefix).
+    Example: /api/communities → /communities
+    Routes defined with /api (diagnostics, db-status, logs) are excluded.
+    """
+    path = request.url.path
+    if path.startswith("/api/") and path not in _API_PREFIX_ROUTES:
+        new_path = path[4:]
+        request.scope["path"] = new_path
+        request.scope["raw_path"] = new_path.encode()
+    response = await call_next(request)
+    return response
+
+
 @app.middleware("http")
 # Request correlation + logging. Generates request_id, adds X-Request-Id and X-EngageFlow-Git-Sha headers.
 async def request_logging_middleware(request: Request, call_next):

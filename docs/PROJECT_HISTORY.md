@@ -667,3 +667,20 @@ Verification: Trigger API error → UI shows specific message (not "Internal ser
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #36 — Add middleware to strip /api prefix for frontend compatibility
+
+Date: 2026-03-04
+Change: Added `strip_api_prefix_middleware` to rewrite `/api/*` → `/*` before route matching. Frontend calls `/api/communities`, `/api/profiles`, etc., but backend routes are defined without prefix. Middleware transparently strips `/api` so frontend requests reach correct handlers.
+Files:
+- backend/app.py (strip_api_prefix_middleware)
+- docs/PROJECT_HISTORY.md
+
+Reason: Frontend consistently calls `/api/*` endpoints; backend routes are `/*`. Some routes had both paths, most did not → 404/500 errors. Middleware provides universal fix without changing all route definitions.
+Tests: Manual verification
+Verification: curl /api/communities and /communities both return 200; frontend loads without 500 errors
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
