@@ -511,3 +511,20 @@ Verification: curl /api/diagnostics → git_sha in JSON and X-EngageFlow-Git-Sha
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #27 — /api/automation/* alias routes (UI Stop 404 fix)
+
+Date: 2026-03-04
+Change: UI calls /api/automation/stop (prefixed) when base URL has /api; backend only had /automation/stop → 404 → "Internal server error" toast. Added alias routes: /api/automation/stop, /api/automation/status, /api/automation/start, /api/automation/pause, /api/automation/resume. Both prefixed and unprefixed paths now work.
+Files:
+- backend/app.py (dual decorators for stop, status, start, pause, resume)
+- backend/tests/test_automation_control_contract.py (test_stop_prefixed_route_ok, test_status_prefixed_route_ok, etc.)
+- docs/PROJECT_STATE.md, docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -v (42 passed)
+Verification: POST /api/automation/stop → 200; GET /api/automation/status → 200
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW

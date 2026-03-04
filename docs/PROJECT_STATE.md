@@ -39,7 +39,7 @@ Working / Partial / Broken
                       ↘ serves UI
 ```
 
-Backend: FastAPI, SQLite (engageflow.db), automation engine.
+Backend: FastAPI, SQLite (engageflow.db), automation engine. Automation control routes accept BOTH /automation/* and /api/automation/* (UI may call either).
 Frontend: React, Vite, React Query, TanStack Router.
 
 ## How To Run

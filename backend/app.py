@@ -6992,6 +6992,7 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
     return build_conversation_model(row, messages)
 
 @app.post("/automation/start")
+@app.post("/api/automation/start")
 async def automation_start(payload: AutomationStartRequest, request: Request):
     engine = get_automation_engine(request)
     try:
@@ -7021,6 +7022,7 @@ def _idempotent_stopped_response() -> Dict[str, Any]:
 
 
 @app.get("/automation/stop")
+@app.get("/api/automation/stop")
 async def automation_stop_get(request: Request):
     """GET returns current status (idempotent). Use POST to actually stop."""
     engine = getattr(request.app.state, "automation_engine", None)
@@ -7030,6 +7032,7 @@ async def automation_stop_get(request: Request):
 
 
 @app.post("/automation/stop")
+@app.post("/api/automation/stop")
 async def automation_stop(request: Request):
     engine = getattr(request.app.state, "automation_engine", None)
     if engine is None:
@@ -7050,6 +7053,7 @@ async def automation_stop(request: Request):
 
 
 @app.post("/automation/pause")
+@app.post("/api/automation/pause")
 async def automation_pause(request: Request):
     engine = get_automation_engine(request)
     try:
@@ -7059,6 +7063,7 @@ async def automation_pause(request: Request):
 
 
 @app.post("/automation/resume")
+@app.post("/api/automation/resume")
 async def automation_resume(request: Request):
     engine = get_automation_engine(request)
     try:
@@ -7071,6 +7076,7 @@ async def automation_resume(request: Request):
 
 
 @app.get("/automation/status")
+@app.get("/api/automation/status")
 async def automation_status(request: Request):
     engine = get_automation_engine(request)
     return await engine.get_status()
