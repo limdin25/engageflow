@@ -486,31 +486,27 @@ export default function DashboardPage() {
     if (!engineStatus?.isRunning || engineStatus?.isPaused) return "Waiting for start";
     if (connectionRest?.active) return formatNextActionCountdown(connectionRest.remainingSeconds);
     if (displayActiveTask) return "Executing";
-    if (!nextQueueItem && !engineStatus?.nextScheduledFor) {
-      if (isWaitingSchedule) {
-        const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
-        if (sec > 0) return formatNextActionCountdown(sec);
-        return "Starting...";
-      }
-      return emptyQueueReason || "No actions scheduled";
+    if (isWaitingSchedule && !nextQueueItem) {
+      const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
+      if (sec > 0) return formatNextActionCountdown(sec);
+      return "Starting...";
+    }
+    if (!nextQueueItem) return emptyQueueReason || "No actions scheduled";
+    const scheduledMs = parseQueueTimestampMs(
+      String(nextQueueItem.scheduledFor || ""),
+      String(nextQueueItem.scheduledTime || ""),
+      adjustedQueueNowMs,
+    );
+    if (Number.isFinite(scheduledMs)) {
+      const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
+      if (secondsLeft <= 0) return "Starting...";
+      return formatNextActionCountdown(secondsLeft);
     }
     const apiScheduled = String(engineStatus?.nextScheduledFor || "").trim();
     if (apiScheduled) {
       const ts = Date.parse(apiScheduled.replace(" ", "T"));
       if (Number.isFinite(ts)) {
         const secondsLeft = Math.floor((ts - adjustedQueueNowMs) / 1000);
-        if (secondsLeft <= 0) return "Starting...";
-        return formatNextActionCountdown(secondsLeft);
-      }
-    }
-    if (nextQueueItem) {
-      const scheduledMs = parseQueueTimestampMs(
-        String(nextQueueItem.scheduledFor || ""),
-        String(nextQueueItem.scheduledTime || ""),
-        adjustedQueueNowMs,
-      );
-      if (Number.isFinite(scheduledMs)) {
-        const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
         if (secondsLeft <= 0) return "Starting...";
         return formatNextActionCountdown(secondsLeft);
       }

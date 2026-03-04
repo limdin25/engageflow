@@ -745,3 +745,18 @@ Verification: curl /api/diagnostics shows next_action_id when queue has future i
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #40 — Align countdown with VPS working clone (queue-first)
+
+Date: 2026-03-04
+Change: VPS source-of-truth uses queue-first countdown: when nextQueueItem exists, compute from queue (scheduledFor - now) client-side. No dependency on nextScheduledFor for main path. Aligned frontend nextCountdown to match: queue-first, then nextScheduledFor, then countdownSeconds. Countdown persists across refresh because queue data is refetched and recomputed.
+Files:
+- frontend/src/pages/DashboardPage.tsx (nextCountdown: queue-first like VPS)
+- docs/PROJECT_HISTORY.md
+
+Reason: User asked "did you copy what was working?" — VPS at 38.242.229.161:/root/.openclaw/workspace-margarita/engageflow has no nextScheduledFor; countdown comes from queue. Aligned GitHub frontend to same logic.
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
