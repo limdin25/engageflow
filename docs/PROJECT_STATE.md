@@ -48,6 +48,8 @@ Frontend: React, Vite, React Query, TanStack Router.
 
 **Stop persists:** Stop sets `masterEnabled=false` in automation_settings. Start sets `masterEnabled=true`. On startup, if `masterEnabled=false` in DB, auto-start is skipped (log: "Auto-start suppressed by DB flag"). Prevents "I clicked Stop and it kept running" after container restarts.
 
+**Diagnostics/Start:** db_master_enabled always boolean (never null). POST /api/automation/start accepts no body or {}. Stop has 8s timeout to avoid 502.
+
 ## How To Run
 
 **Docker (recommended):**

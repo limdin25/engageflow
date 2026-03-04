@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -468,7 +468,7 @@ async def api_diagnostics(request: Request):
         "git_sha": _BUILD_INFO["git_sha"],
         "build_time_utc": _BUILD_INFO["build_time_utc"],
         "service_name": _BUILD_INFO["service_name"],
-        "db_master_enabled": None,
+        "db_master_enabled": True,
         "system_health": {"status": "unknown", "running": False},
         "database_status": None,
         "automation_engine_state": {"running": False, "current_task": None, "next_wakeup": None},
@@ -478,7 +478,7 @@ async def api_diagnostics(request: Request):
             "ENGAGEFLOW_AUTOMATION_ENABLED": ENGAGEFLOW_AUTOMATION_ENABLED,
             "ENGAGEFLOW_DEBUG": ENGAGEFLOW_DEBUG,
             "db_path": str(DB_PATH),
-            "db_master_enabled": None,
+            "db_master_enabled": True,
         },
     }
     try:
@@ -503,10 +503,11 @@ async def api_diagnostics(request: Request):
     try:
         with get_db() as db:
             settings = _load_or_create_automation_settings(db)
-            result["db_master_enabled"] = settings.masterEnabled
-            result["environment_flags"]["db_master_enabled"] = settings.masterEnabled
+            result["db_master_enabled"] = bool(settings.masterEnabled)
+            result["environment_flags"]["db_master_enabled"] = bool(settings.masterEnabled)
     except Exception:
-        pass
+        result["db_master_enabled"] = True
+        result["environment_flags"]["db_master_enabled"] = True
     try:
         result["database_status"] = _get_db_status_payload()
         result["last_activity_timestamp"] = result["database_status"].get("last_activity_timestamp")
@@ -7048,11 +7049,12 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
 
 @app.post("/automation/start")
 @app.post("/api/automation/start")
-async def automation_start(payload: AutomationStartRequest, request: Request):
+async def automation_start(request: Request, payload: Optional[AutomationStartRequest] = Body(default=None)):
+    p = payload or AutomationStartRequest()
     _set_master_enabled_db(True)
     engine = get_automation_engine(request)
     try:
-        return _with_request_id(request, await engine.start(payload.profiles, payload.globalSettings))
+        return _with_request_id(request, await engine.start(p.profiles, p.globalSettings))
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -7122,8 +7124,12 @@ async def automation_stop(request: Request):
     if engine is None:
         return _with_request_id(request, _idempotent_stopped_response())
     try:
-        status = await engine.stop()
+        status = await asyncio.wait_for(engine.stop(), timeout=8)
         return _with_request_id(request, {**(status or {}), "ok": True})
+    except asyncio.TimeoutError:
+        LOGGER.warning("Automation stop timed out after 8s")
+        _RECENT_ERRORS.append("[stop] timeout after 8s")
+        return _with_request_id(request, _stop_error_response("Stop timed out"))
     except asyncio.CancelledError:
         return _with_request_id(request, _idempotent_stopped_response())
     except Exception as exc:

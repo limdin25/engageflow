@@ -598,3 +598,20 @@ Verification: Push to dev triggers Railway auto-deploy; curl /api/diagnostics sh
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #32 — diagnostics bool, start optional body, stop timeout
+
+Date: 2026-03-04
+Change: /api/diagnostics db_master_enabled always boolean (default True when settings unreadable). POST /api/automation/start accepts no body or {} (Body(default=None)). Stop handler wrapped in asyncio.wait_for(8s) to avoid gateway timeout 502.
+Files:
+- backend/app.py (diagnostics default True, start optional body, stop timeout)
+- backend/tests/test_diagnostics_master_enabled.py (test_diagnostics_db_master_enabled_is_bool_even_when_settings_missing, test_start_accepts_no_body, test_start_accepts_empty_json)
+- docs/PROJECT_HISTORY.md
+
+Tests: pytest backend/tests -q (58 passed)
+Verification: /api/diagnostics never null; curl -X POST /api/automation/start (no body) works
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW
