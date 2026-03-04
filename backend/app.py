@@ -6911,7 +6911,11 @@ async def automation_start(payload: AutomationStartRequest, request: Request):
 @app.post("/automation/stop")
 async def automation_stop(request: Request):
     engine = get_automation_engine(request)
-    return await engine.stop()
+    try:
+        return await engine.stop()
+    except Exception as exc:
+        LOGGER.exception("Automation stop failed: %s", exc)
+        raise HTTPException(503, f"Stop failed: {exc!s}")
 
 
 @app.post("/automation/pause")

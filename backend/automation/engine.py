@@ -557,7 +557,11 @@ class AutomationEngine:
         task_to_wait: Optional[asyncio.Task[None]] = None
         session_task_to_wait: Optional[asyncio.Task[None]] = None
         should_log_stopped = False
-        due_pending_before_stop = await asyncio.to_thread(self._count_due_queue_actions)
+        try:
+            due_pending_before_stop = await asyncio.to_thread(self._count_due_queue_actions)
+        except Exception as e:
+            LOGGER.warning("_count_due_queue_actions during stop: %s", e)
+            due_pending_before_stop = 0
         async with self._lock:
             should_log_stopped = bool(self._state.is_running or self._state.run_state != "idle")
             self._state.is_running = False
@@ -569,12 +573,17 @@ class AutomationEngine:
             self._state.connection_rest_rounds_completed = 0
             task_to_wait = self._task
             session_task_to_wait = self._session_task
-            self._save_run_state_locked()
+            try:
+                self._save_run_state_locked()
+            except Exception as e:
+                LOGGER.warning("_save_run_state_locked during stop: %s", e)
         if task_to_wait and not task_to_wait.done():
             try:
                 await asyncio.wait_for(task_to_wait, timeout=5)
             except asyncio.TimeoutError:
                 task_to_wait.cancel()
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
         async with self._lock:
@@ -585,22 +594,46 @@ class AutomationEngine:
                 await asyncio.wait_for(session_task_to_wait, timeout=5)
             except asyncio.TimeoutError:
                 session_task_to_wait.cancel()
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
         async with self._lock:
             if self._session_task is session_task_to_wait:
                 self._session_task = None
         if due_pending_before_stop > 0:
-            await self.publish_log(
-                (
-                    "[SKOOL] Pending due tasks left unprocessed: "
-                    f"{due_pending_before_stop} reason=scheduler_stopped_before_due_execution"
-                ),
-                status="retry",
-            )
+            try:
+                await self.publish_log(
+                    (
+                        "[SKOOL] Pending due tasks left unprocessed: "
+                        f"{due_pending_before_stop} reason=scheduler_stopped_before_due_execution"
+                    ),
+                    status="retry",
+                )
+            except Exception:
+                pass
         if should_log_stopped:
-            await self.publish_log("[SKOOL] Scheduler stopped", status="info")
-        return await self.get_status()
+            try:
+                await self.publish_log("[SKOOL] Scheduler stopped", status="info")
+            except Exception:
+                pass
+        try:
+            return await self.get_status()
+        except Exception as e:
+            LOGGER.warning("get_status after stop: %s", e)
+            return {
+                "success": True,
+                "isRunning": False,
+                "isPaused": False,
+                "state": "idle",
+                "runState": "idle",
+                "countdownSeconds": 0,
+                "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
+                "currentProfileIndex": 0,
+                "profiles": [],
+                "stats": {},
+                "activity": [],
+            }
 
     async def shutdown(self, preserve_run_state: bool = True) -> None:
         task_to_wait: Optional[asyncio.Task[None]] = None
