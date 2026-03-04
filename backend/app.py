@@ -655,6 +655,32 @@ async def debug_runtime(request: Request):
     }
 
 
+@app.get("/debug/dbinfo")
+def debug_dbinfo():
+    """Railway-only: DB path, size, profiles counts. Requires ENGAGEFLOW_DEBUG=1. No cookie contents."""
+    if not ENGAGEFLOW_DEBUG:
+        raise HTTPException(404, "Not found")
+    try:
+        path = DB_PATH
+        size = path.stat().st_size if path.exists() else 0
+        profiles_count = 0
+        profiles_with_cookie_json = 0
+        if path.exists() and size > 0:
+            with sqlite3.connect(path, timeout=5.0) as conn:
+                profiles_count = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+                profiles_with_cookie_json = conn.execute(
+                    "SELECT COUNT(*) FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
+                ).fetchone()[0]
+        return JSONResponse({
+            "db_path": str(path),
+            "file_size_bytes": size,
+            "profiles_count": profiles_count,
+            "profiles_with_cookie_json": profiles_with_cookie_json,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/debug/scheduler")
 async def debug_scheduler(request: Request):
     """DEV: scheduler state. Safe fallback (no get_debug_snapshot)."""
