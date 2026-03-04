@@ -6655,6 +6655,10 @@ def read_conversations(profile_id: Optional[str] = None, sync: bool = False):
             _sync_skool_chats_to_inbox(db, force=True)
         messages = build_message_map(db)
         rows = db.execute(query, params).fetchall()
+        # When empty, trigger sync and re-query so inbox populates
+        if not rows and not sync:
+            _sync_skool_chats_to_inbox(db, force=True)
+            rows = db.execute(query, params).fetchall()
 
     def _conversation_rank(row: sqlite3.Row) -> Tuple[float, int]:
         raw_ts = str(row["lastMessageTime"] or "").strip()

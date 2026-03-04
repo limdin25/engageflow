@@ -62,8 +62,8 @@ export const useActivity = () =>
   useQuery({
     queryKey: ["activity"],
     queryFn: () => api.getActivity(100),
-    refetchInterval: 10000,
-    refetchIntervalInBackground: false,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
   });
 

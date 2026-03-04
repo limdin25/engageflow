@@ -438,3 +438,22 @@ Verification: /health, /api/db-status, /debug/runtime, /activity; Railway DEV ru
 Reversal: `git revert HEAD --no-edit`
 ReversalTested: No
 Risk Level: LOW
+
+---
+
+## Entry #23 — Activity Timeline + Inbox sync fixes
+
+Date: 2026-03-04
+Change: Activity Timeline updates when automation runs; Inbox syncs when empty. Backend: read_conversations triggers sync when empty. Frontend: refresh uses sync=true when conversations empty; InboxPage triggers sync on mount when empty; useActivity refetch 5s.
+Files:
+- backend/app.py (read_conversations: sync when empty)
+- frontend/src/context/BackendContext.tsx (sync when empty on refresh)
+- frontend/src/pages/InboxPage.tsx (sync when empty on mount)
+- frontend/src/hooks/useEngageFlow.ts (activity refetch 5s, refetchInBackground)
+- backend/tests/test_activity_inbox.py
+- docs/PROJECT_HISTORY.md
+Tests: pytest backend/tests -v (27 passed)
+Verification: Activity Timeline shows new rows within 5s of automation action; Inbox populates when empty.
+Reversal: `git revert HEAD --no-edit`
+ReversalTested: No
+Risk Level: LOW
