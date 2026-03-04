@@ -5,3 +5,10 @@ node_modules
 dist
 __pycache__
 *.zip
+backend/tests/
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.github
+docs/
+*.md
