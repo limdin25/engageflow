@@ -650,3 +650,20 @@ Verification: Next automation run logs activity immediately after posting; dashb
 Reversal: git revert HEAD --no-edit
 ReversalTested: No
 Risk Level: MEDIUM (execution layer, DB writes)
+
+---
+
+## Entry #35 — Global exception handler returns 200 instead of 500
+
+Date: 2026-03-04
+Change: Modified global `@app.exception_handler(Exception)` to return `status_code=200` with `{success: false, error: "...", message: "...", request_id: "..."}` payload instead of `status_code=500`. This prevents UI from showing generic "Internal server error" toast and allows specific error messages to reach the user.
+Files:
+- backend/app.py (unhandled_exception_handler)
+- docs/PROJECT_HISTORY.md
+
+Reason: HTTP 500 triggers browser's generic error handler before response body can be parsed. Returning 200 allows UI to parse body, check `success: false`, and display specific `message` field. Backend logs still capture full exception stack traces.
+Tests: Manual verification
+Verification: Trigger API error → UI shows specific message (not "Internal server error"); backend logs show full stack trace
+Reversal: git revert HEAD --no-edit
+ReversalTested: No
+Risk Level: LOW

@@ -362,14 +362,29 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
 
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(_: Request, exc: Exception):
-    LOGGER.exception("Unhandled backend exception", exc_info=exc)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Global exception handler - returns 200 with error payload instead of 500.
+    This allows UI to parse response body and display specific error messages
+    instead of triggering generic "Internal server error" toast.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    LOGGER.exception(
+        "Unhandled backend exception: %s %s request_id=%s",
+        request.method,
+        request.url.path,
+        request_id,
+        exc_info=exc,
+    )
+    exc_type = type(exc).__name__
+    exc_msg = str(exc)[:200] if exc else ""
     return JSONResponse(
-        status_code=500,
+        status_code=200,
         content={
             "success": False,
             "error": "internal_error",
-            "message": "Internal server error",
+            "message": f"Request failed: {exc_type}" + (f" - {exc_msg}" if exc_msg else ""),
+            "request_id": request_id,
         },
     )
 
