@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import sqlite3
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
@@ -22,7 +24,7 @@ import requests
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from security_utils import decrypt_secret, encrypt_secret, is_encrypted_secret, mask_secret
@@ -467,6 +469,81 @@ def internal_joiner_profile_cookie_put(profile_id: str, request: Request, body: 
     has_cookie = cookie_json is not None and len(cookie_json) > 0
     LOGGER.info("internal/joiner/cookie PUT profile_id=%s has_cookie=%s", profile_id, has_cookie)
     return {"ok": True}
+
+
+def _require_internal_restore_auth(request: Request) -> None:
+    """Require X-JOINER-SECRET and ENGAGEFLOW_DEBUG=1 for backup/restore. No cookie contents logged."""
+    if not ENGAGEFLOW_DEBUG:
+        raise HTTPException(404, "Not found")
+    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
+    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
+    if not expected or secret != expected:
+        raise HTTPException(401, "Unauthorized")
+
+
+@app.get("/internal/backup-db")
+def internal_backup_db(request: Request):
+    """Create tarball of current DB at ENGAGEFLOW_DB_PATH (and -wal/-shm if present). Returns gzip. Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1."""
+    _require_internal_restore_auth(request)
+    db_path = Path(DB_PATH)
+    data_dir = db_path.parent
+    base = db_path.name
+    patterns = [base, f"{base}-wal", f"{base}-shm"]
+    out_path = Path(tempfile.gettempdir()) / "railway_engageflow_db_backup.tar.gz"
+    try:
+        with tarfile.open(out_path, "w:gz") as tf:
+            for name in patterns:
+                p = data_dir / name
+                if p.exists():
+                    tf.add(p, arcname=name)
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise HTTPException(500, "Backup produced empty file")
+        return FileResponse(out_path, filename="railway_engageflow_db_backup.tar.gz", media_type="application/gzip")
+    except HTTPException:
+        raise
+    except Exception as e:
+        LOGGER.exception("backup-db failed")
+        raise HTTPException(500, str(e))
+
+
+class RestoreDbBody(BaseModel):
+    url: str
+
+
+@app.post("/internal/restore-db")
+def internal_restore_db(request: Request, body: RestoreDbBody):
+    """Download archive from URL and extract into DB directory (overwrites). Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1."""
+    _require_internal_restore_auth(request)
+    url = (body.url or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be http(s)")
+    db_path = Path(DB_PATH)
+    data_dir = db_path.parent
+    try:
+        r = requests.get(url, timeout=120, stream=True)
+        r.raise_for_status()
+        arc = Path(tempfile.gettempdir()) / "engageflow_db_vps_restore.tar.gz"
+        with open(arc, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+        with tarfile.open(arc, "r:gz") as tf:
+            tf.extractall(data_dir)
+        main_db = data_dir / "engageflow.db"
+        if not main_db.exists():
+            raise HTTPException(500, "Archive did not contain engageflow.db")
+        conn = sqlite3.connect(main_db, timeout=5.0)
+        try:
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            conn.close()
+        return JSONResponse({"ok": True, "integrity_check": integrity, "db_path": str(main_db), "size_bytes": main_db.stat().st_size})
+    except HTTPException:
+        raise
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Download failed: {e}")
+    except Exception as e:
+        LOGGER.exception("restore-db failed")
+        raise HTTPException(500, str(e))
 
 
 @app.get("/health")
@@ -5344,6 +5421,8 @@ def ensure_tables() -> None:
             db.execute("ALTER TABLE profiles ADD COLUMN source TEXT")
         if "connected_at" not in profile_cols:
             db.execute("ALTER TABLE profiles ADD COLUMN connected_at TEXT")
+        if "cookie_json" not in profile_cols:
+            db.execute("ALTER TABLE profiles ADD COLUMN cookie_json TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS communities (id TEXT PRIMARY KEY,profileId TEXT NOT NULL,name TEXT NOT NULL,url TEXT NOT NULL,dailyLimit INTEGER NOT NULL,maxPostAgeDays INTEGER NOT NULL DEFAULT 0,lastScanned TEXT NOT NULL,status TEXT NOT NULL,matchesToday INTEGER NOT NULL,actionsToday INTEGER NOT NULL,totalScannedPosts INTEGER NOT NULL,totalKeywordMatches INTEGER NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY,name TEXT NOT NULL,color TEXT NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS keyword_rules (id TEXT PRIMARY KEY,keyword TEXT NOT NULL,persona TEXT NOT NULL,promptPreview TEXT NOT NULL,commentPrompt TEXT,dmPrompt TEXT,dmMaxReplies INTEGER,dmReplyDelay INTEGER,active INTEGER NOT NULL,assignedProfileIds TEXT NOT NULL)""")
