@@ -5339,6 +5339,11 @@ def _set_master_enabled_db(enabled: bool) -> None:
 def ensure_tables() -> None:
     with get_db() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,username TEXT NOT NULL,password TEXT NOT NULL,email TEXT,proxy TEXT,avatar TEXT NOT NULL,status TEXT NOT NULL,dailyUsage INTEGER NOT NULL,groupsConnected INTEGER NOT NULL)""")
+        profile_cols = {str(row["name"] or "").strip() for row in db.execute("PRAGMA table_info(profiles)").fetchall()}
+        if "source" not in profile_cols:
+            db.execute("ALTER TABLE profiles ADD COLUMN source TEXT")
+        if "connected_at" not in profile_cols:
+            db.execute("ALTER TABLE profiles ADD COLUMN connected_at TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS communities (id TEXT PRIMARY KEY,profileId TEXT NOT NULL,name TEXT NOT NULL,url TEXT NOT NULL,dailyLimit INTEGER NOT NULL,maxPostAgeDays INTEGER NOT NULL DEFAULT 0,lastScanned TEXT NOT NULL,status TEXT NOT NULL,matchesToday INTEGER NOT NULL,actionsToday INTEGER NOT NULL,totalScannedPosts INTEGER NOT NULL,totalKeywordMatches INTEGER NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY,name TEXT NOT NULL,color TEXT NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS keyword_rules (id TEXT PRIMARY KEY,keyword TEXT NOT NULL,persona TEXT NOT NULL,promptPreview TEXT NOT NULL,commentPrompt TEXT,dmPrompt TEXT,dmMaxReplies INTEGER,dmReplyDelay INTEGER,active INTEGER NOT NULL,assignedProfileIds TEXT NOT NULL)""")
@@ -5466,6 +5471,8 @@ class ProfileModel(BaseModel):
     groupsConnected: int
     hasPassword: bool = False
     proxyStatus: Optional[str] = None
+    source: Optional[str] = None
+    connected_at: Optional[str] = None
 
 
 class ProfileCreateModel(BaseModel):
@@ -5488,6 +5495,11 @@ class ProfileUpdateModel(BaseModel):
     status: Optional[str] = None
     dailyUsage: Optional[int] = None
     groupsConnected: Optional[int] = None
+
+
+class ConnectSkoolModel(BaseModel):
+    email: str
+    password: str
 
 
 class CommunityModel(BaseModel):
@@ -6186,7 +6198,47 @@ def build_profile_model(row: sqlite3.Row) -> ProfileModel:
         groupsConnected=groups_connected,
         hasPassword=bool(str(data.get("password") or "").strip()),
         proxyStatus=proxy_status,
+        source=data.get("source"),
+        connected_at=data.get("connected_at"),
     )
+
+
+@app.post("/connect-skool")
+async def connect_skool(payload: ConnectSkoolModel, request: Request):
+    """Public endpoint for micro-workers to connect Skool accounts. Creates profile with source='micro', status='paused'."""
+    email = (payload.email or "").strip()
+    password_plain = (payload.password or "").strip()
+    if not email or not password_plain:
+        raise HTTPException(400, "email and password are required")
+    profile_id = str(uuid.uuid4())
+    password_encrypted = encrypt_secret(password_plain)
+    name = email.split("@")[0] or email
+    username = email
+    avatar = "".join([part[0] for part in name.split() if part]).upper()[:2] or "NA"
+    connected_at = datetime.now(timezone.utc).isoformat()
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO profiles (id, name, username, password, email, proxy, avatar, status, dailyUsage, groupsConnected, source, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile_id, name, username, password_encrypted, email, None, avatar, "paused", 0, 0, "micro", connected_at),
+        )
+        db.commit()
+    engine = get_automation_engine(request)
+    try:
+        result = await engine.check_login(profile_id)
+        if isinstance(result, dict) and result.get("success"):
+            return {"success": True, "profileId": profile_id, "message": "Connected"}
+        msg = str(result.get("message", "Login failed")) if isinstance(result, dict) else "Login failed"
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, str(e))
 
 
 @app.get("/profiles", response_model=List[ProfileModel])

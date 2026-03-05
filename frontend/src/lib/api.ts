@@ -23,6 +23,7 @@ function timeoutForPath(path: string): number {
   // Community sync can take longer because Playwright iterates profiles one by one.
   if (p.includes("/communities/fetch")) return 90000;
   if (p.includes("/check-login")) return 70000;
+  if (p.includes("/connect-skool")) return 70000;
   if (p.includes("/check-proxy")) return 70000;
   if (p.includes("/conversations") && p.includes("sync=true")) return 70000;
   if (p.includes("/conversations/") && p.includes("/messages")) return 45000;
@@ -287,6 +288,11 @@ export const api = {
   updateProfile: (id: string, payload: Partial<Profile>) => request<Profile>(`/profiles/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteProfile: (id: string) => request<{ success: boolean }>(`/profiles/${id}`, { method: "DELETE" }),
   profileResetCounters: (profileId: string) => request<{ success: boolean }>(`/profiles/${profileId}/reset-counters`, { method: "POST" }),
+  connectSkool: (payload: { email: string; password: string }) =>
+    request<{ success: boolean; profileId?: string; message?: string }>("/connect-skool", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   getCommunities: () => request<Community[]>("/communities"),
   fetchCommunities: () => request<CommunityFetchStatus>("/communities/fetch", { method: "POST" }),
