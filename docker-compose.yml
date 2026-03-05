@@ -25,6 +25,7 @@ services:
       - backend
     environment:
       - TZ=Europe/London
+      - PORT=80
     ports:
       - "80:80"
     restart: unless-stopped

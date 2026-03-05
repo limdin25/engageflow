@@ -10,8 +10,8 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 ENV TZ=Europe/London
-# Railway injects PORT; default for local runs.
-ENV PORT=8080
+# Railway injects PORT; Docker Compose uses PORT=80.
+ENV PORT=80
 
 RUN apk add --no-cache tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
