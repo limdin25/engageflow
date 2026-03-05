@@ -23,6 +23,8 @@ dist-ssr/
 backend/__pycache__/
 backend/*.py[cod]
 backend/*.db
+backend/*.db-wal
+backend/*.db-shm
 backend/skool_accounts/
 backend/skool_daily_counters_state.json
 backend/skool_global_blacklist.json
@@ -34,6 +36,15 @@ backend/.env
 .env.*
 .railway-secrets
 .railway/
+
+# VPS shared data (do not commit)
+engageflow-shared
+/root/engageflow-shared
+
+# Python venv
+venv/
+.venv/
+backend/venv/
 
 # Python cache (fallback)
 __pycache__/
