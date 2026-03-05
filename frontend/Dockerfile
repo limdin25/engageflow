@@ -10,12 +10,15 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 ENV TZ=Europe/London
+# Railway injects PORT; default for local runs.
+ENV PORT=8080
 
 RUN apk add --no-cache tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone
 
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80
+COPY nginx.conf.template /etc/nginx/conf.d/default.conf.template
+# Substitute PORT at runtime so Railway's PORT is used.
+EXPOSE 8080
+CMD ["sh", "-c", "envsubst '${PORT}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]

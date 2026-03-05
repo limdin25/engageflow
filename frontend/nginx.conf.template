@@ -1,0 +1,15 @@
+server {
+  listen ${PORT};
+  server_name _;
+
+  # Built frontend assets.
+  root /usr/share/nginx/html;
+  index index.html;
+
+  # On Railway, frontend and backend are separate services. API calls use VITE_BACKEND_URL
+  # from the browser (no nginx proxy). Docker Compose used proxy_pass http://backend:8000/.
+  # SPA fallback for client-side routes.
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
