@@ -76,7 +76,7 @@ Redeploy all three and wait for builds to finish.
 ## Proof required
 
 1. **GitHub dev commit SHA**  
-   After Step B: `git rev-parse HEAD` (on `dev`) → record it: _________________.
+   After Step B: **`8a5cb5447ac3356c3f4cc5b91462ab5ff50f1c14`** (dev @ 8a5cb54).
 
 2. **Railway build logs**  
    For each new service, open latest deployment → Build logs. Confirm:
@@ -86,6 +86,12 @@ Redeploy all three and wait for builds to finish.
 
 3. **Health / identity curls**  
    After deploy, get the **new** service URLs from Railway (e.g. engageflow-new → Settings → Domains). Then run:
+
+   ```bash
+   ./scripts/phase-0-1-proof.sh "https://<engageflow-new-url>" "https://<frontend-new-url>" "https://<joiner-new-url>"
+   ```
+
+   Or manually:
 
    ```bash
    # EngageFlow backend (engageflow-new)
