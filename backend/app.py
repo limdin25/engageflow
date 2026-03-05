@@ -510,15 +510,8 @@ class RestoreDbBody(BaseModel):
     url: str
 
 
-@app.post("/internal/restore-db")
-def internal_restore_db(request: Request, body: RestoreDbBody):
-    """Download archive from URL and extract into DB directory (overwrites). Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1. Used for Phase 2 VPS->Railway restore."""
-    _require_internal_restore_auth(request)
-    url = (body.url or "").strip()
-    if not url or not url.startswith(("http://", "https://")):
-        raise HTTPException(400, "url must be http(s)")
-    db_path = Path(DB_PATH)
-    data_dir = db_path.parent
+def _do_restore_sync(url: str, data_dir: Path) -> None:
+    """Run in background thread: download archive and extract to data_dir."""
     try:
         r = requests.get(url, timeout=120, stream=True)
         r.raise_for_status()
@@ -529,21 +522,32 @@ def internal_restore_db(request: Request, body: RestoreDbBody):
         with tarfile.open(arc, "r:gz") as tf:
             tf.extractall(data_dir)
         main_db = data_dir / "engageflow.db"
-        if not main_db.exists():
-            raise HTTPException(500, "Archive did not contain engageflow.db")
-        conn = sqlite3.connect(main_db, timeout=5.0)
-        try:
-            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        finally:
-            conn.close()
-        return JSONResponse({"ok": True, "integrity_check": integrity, "db_path": str(main_db), "size_bytes": main_db.stat().st_size})
-    except HTTPException:
-        raise
-    except requests.RequestException as e:
-        raise HTTPException(502, f"Download failed: {e}")
+        if main_db.exists():
+            conn = sqlite3.connect(main_db, timeout=5.0)
+            try:
+                conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                conn.close()
+        LOGGER.info("restore-db background completed: %s", main_db)
     except Exception as e:
-        LOGGER.exception("restore-db failed")
-        raise HTTPException(500, str(e))
+        LOGGER.exception("restore-db background failed: %s", e)
+
+
+@app.post("/internal/restore-db")
+def internal_restore_db(request: Request, body: RestoreDbBody):
+    """Start restore in background and return 202. Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1. Poll /debug/dbinfo for result. Build marker: dbb59c2."""
+    _require_internal_restore_auth(request)
+    url = (body.url or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be http(s)")
+    db_path = Path(DB_PATH)
+    data_dir = db_path.parent
+    t = threading.Thread(target=_do_restore_sync, args=(url, data_dir), daemon=True)
+    t.start()
+    return JSONResponse(
+        status_code=202,
+        content={"status": "accepted", "message": "Restore started in background. Poll /debug/dbinfo for profiles_count."},
+    )
 
 
 @app.get("/health")
