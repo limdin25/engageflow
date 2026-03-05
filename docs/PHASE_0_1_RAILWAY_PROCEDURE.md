@@ -76,7 +76,7 @@ Redeploy all three and wait for builds to finish.
 ## Proof required
 
 1. **GitHub dev commit SHA**  
-   After Step B: **`8a5cb5447ac3356c3f4cc5b91462ab5ff50f1c14`** (dev @ 8a5cb54).
+   After Step B: **`8a5cb5447ac3356c3f4cc5b91462ab5ff50f1c14`** (dev @ 8a5cb54). Latest dev: **3084e78** (includes proof script).
 
 2. **Railway build logs**  
    For each new service, open latest deployment → Build logs. Confirm:
