@@ -1,0 +1,1 @@
+Trigger rebuild from dev. Commit 98dc055+ (db-info, cookie_json migration, auth codes). Do not remove — used to force Railway to rebuild from source.
