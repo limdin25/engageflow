@@ -118,62 +118,59 @@ async function pushCookiesToEngageFlow(profileId, cookieJson) {
 }
 
 // ==================== COOKIE SYNC (Railway only) ====================
+// Match by LOWER(TRIM(email)) so casing/whitespace differences don't block updates.
 async function syncCookiesFromEngageFlow() {
   const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
   const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
   if (!baseUrl || !secret) return { scanned: 0, updated: 0, skipped: 'missing env' };
-  const profiles = engageflowDb.prepare('SELECT id, cookie_json FROM profiles').all();
-  if (profiles.length === 0) return { scanned: 0, updated: 0, skipped: 'no profiles' };
-  const CONCURRENCY = 3;
-  const TIMEOUT_MS = 10000;
-  let synced = 0;
-  for (let i = 0; i < profiles.length; i += CONCURRENCY) {
-    const batch = profiles.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(batch.map(async (p) => {
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-        const res = await fetch(`${baseUrl}/internal/joiner/profiles/${p.id}/cookie`, {
-          headers: { 'X-JOINER-SECRET': secret },
-          signal: ctrl.signal,
-        });
-        clearTimeout(t);
-        if (res.status !== 200) return { id: p.id, ok: false };
-        const data = await res.json();
-        const remote = (data.cookie_json || '').trim() || null;
-        const local = (p.cookie_json || '').trim() || null;
-        if (remote && remote !== local) {
-          engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(remote, p.id);
-          return { id: p.id, ok: true, updated: true };
-        }
-        return { id: p.id, ok: true, updated: false };
-      } catch (err) {
-        try {
-          const ctrl = new AbortController();
-          const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-          const res = await fetch(`${baseUrl}/internal/joiner/profiles/${p.id}/cookie`, {
-            headers: { 'X-JOINER-SECRET': secret },
-            signal: ctrl.signal,
-          });
-          clearTimeout(t);
-          if (res.status !== 200) return { id: p.id, ok: false };
-          const data = await res.json();
-          const remote = (data.cookie_json || '').trim() || null;
-          const local = (p.cookie_json || '').trim() || null;
-          if (remote && remote !== local) {
-            engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(remote, p.id);
-            return { id: p.id, ok: true, updated: true };
-          }
-          return { id: p.id, ok: true, updated: false };
-        } catch {
-          return { id: p.id, ok: false };
-        }
-      }
-    }));
-    synced += results.filter(r => r.updated).length;
+  dedupeProfilesByEmail();
+  let res;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    res = await fetch(`${baseUrl}/internal/joiner/profiles-cookies`, {
+      headers: { 'X-JOINER-SECRET': secret },
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+  } catch (e) {
+    console.warn('[cookie-sync] Fetch profiles-cookies failed:', e.message);
+    return { scanned: 0, updated: 0, skipped: 'fetch failed' };
   }
-  if (synced > 0) console.log('[cookie-sync] Synced cookies for', synced, 'profile(s) from EngageFlow');
-  return { scanned: profiles.length, updated: synced };
+  if (res.status !== 200) return { scanned: 0, updated: 0, skipped: `http ${res.status}` };
+  const data = await res.json();
+  const profiles = data.profiles || [];
+  if (profiles.length === 0) return { scanned: 0, updated: 0, skipped: 'no profiles with cookies' };
+  const updateStmt = engageflowDb.prepare(
+    'UPDATE profiles SET cookie_json = ? WHERE LOWER(TRIM(COALESCE(email, ""))) = LOWER(TRIM(?))'
+  );
+  let updated = 0;
+  for (const p of profiles) {
+    const email = (p.email || '').trim();
+    if (!email) continue;
+    const cookieJson = (p.cookie_json || '').trim() || null;
+    const info = updateStmt.run(cookieJson, email);
+    if (info.changes > 0) updated += info.changes;
+  }
+  if (updated > 0) console.log('[cookie-sync] Synced cookies for', updated, 'profile(s) from EngageFlow (by email)');
+  return { scanned: profiles.length, updated };
+}
+
+// Keep newest row per LOWER(TRIM(email)); remove duplicates.
+function dedupeProfilesByEmail() {
+  const rows = engageflowDb.prepare('SELECT rowid, id, email FROM profiles').all();
+  const byKey = {};
+  for (const r of rows) {
+    const key = (r.email || '').trim().toLowerCase() || r.id;
+    if (!byKey[key] || r.rowid > byKey[key].rowid) byKey[key] = r;
+  }
+  const keepRowids = new Set(Object.values(byKey).map((r) => r.rowid));
+  const toDelete = rows.filter((r) => !keepRowids.has(r.rowid)).map((r) => r.rowid);
+  if (toDelete.length === 0) return 0;
+  const del = engageflowDb.prepare('DELETE FROM profiles WHERE rowid = ?');
+  for (const rowid of toDelete) del.run(rowid);
+  console.log('[db] Deduped profiles: removed', toDelete.length, 'duplicate(s) by email');
+  return toDelete.length;
 }
 
 // ==================== ROOT / HEALTH ====================

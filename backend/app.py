@@ -432,13 +432,39 @@ def get_automation_engine(request: Request) -> AutomationEngine:
     return request.app.state.automation_engine
 
 
-@app.get("/internal/joiner/profiles/{profile_id}/cookie")
-def internal_joiner_profile_cookie(profile_id: str, request: Request):
-    """Internal: return cookie_json for Joiner sync. Requires X-JOINER-SECRET header. Never logs cookie contents."""
+def _require_joiner_secret(request: Request) -> None:
     expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
     secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
     if not expected or secret != expected:
         raise HTTPException(401, "Unauthorized")
+
+
+@app.get("/internal/joiner/profiles-cookies")
+def internal_joiner_profiles_cookies(request: Request):
+    """Internal: return all profiles with cookie_json for Joiner sync by email. Requires X-JOINER-SECRET. Never logs cookie contents."""
+    _require_joiner_secret(request)
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT email, cookie_json FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
+        ).fetchall()
+    profiles = [{"email": (r["email"] or "").strip() or None, "cookie_json": r["cookie_json"]} for r in rows]
+    LOGGER.info("internal/joiner/profiles-cookies returned %s profile(s) with cookies", len(profiles))
+    return {"profiles": profiles}
+
+
+@app.get("/internal/joiner/debug-profiles")
+def internal_joiner_debug_profiles(request: Request):
+    """Debug: email + LENGTH(cookie_json) for all profiles. Requires X-JOINER-SECRET. No cookie content."""
+    _require_joiner_secret(request)
+    with get_db() as db:
+        rows = db.execute("SELECT email, LENGTH(cookie_json) AS cookie_json_length FROM profiles").fetchall()
+    return {"rows": [{"email": r["email"], "cookie_json_length": r["cookie_json_length"]} for r in rows]}
+
+
+@app.get("/internal/joiner/profiles/{profile_id}/cookie")
+def internal_joiner_profile_cookie(profile_id: str, request: Request):
+    """Internal: return cookie_json for Joiner sync. Requires X-JOINER-SECRET header. Never logs cookie contents."""
+    _require_joiner_secret(request)
     with get_db() as db:
         row = db.execute(
             "SELECT cookie_json FROM profiles WHERE id = ?",
@@ -455,10 +481,7 @@ def internal_joiner_profile_cookie(profile_id: str, request: Request):
 @app.put("/internal/joiner/profiles/{profile_id}/cookie")
 def internal_joiner_profile_cookie_put(profile_id: str, request: Request, body: dict = Body(default={})):
     """Internal: store cookie_json from Joiner Connect/paste. Requires X-JOINER-SECRET. Never logs cookie contents."""
-    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
-    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
-    if not expected or secret != expected:
-        raise HTTPException(401, "Unauthorized")
+    _require_joiner_secret(request)
     cookie_json = (body.get("cookie_json") or "").strip() or None
     with get_db() as db:
         exists = db.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone()
