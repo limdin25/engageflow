@@ -512,7 +512,7 @@ class RestoreDbBody(BaseModel):
 
 @app.post("/internal/restore-db")
 def internal_restore_db(request: Request, body: RestoreDbBody):
-    """Download archive from URL and extract into DB directory (overwrites). Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1."""
+    """Download archive from URL and extract into DB directory (overwrites). Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1. Used for Phase 2 VPS->Railway restore."""
     _require_internal_restore_auth(request)
     url = (body.url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
