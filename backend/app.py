@@ -472,7 +472,7 @@ def internal_joiner_profile_cookie_put(profile_id: str, request: Request, body: 
 
 
 def _require_internal_restore_auth(request: Request) -> None:
-    """Require X-JOINER-SECRET and ENGAGEFLOW_DEBUG=1 for backup/restore. No cookie contents logged."""
+    """Require X-JOINER-SECRET and ENGAGEFLOW_DEBUG=1 for backup/restore. Never log DB bytes or cookie_json."""
     if not ENGAGEFLOW_DEBUG:
         raise HTTPException(404, "Not found")
     expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
