@@ -1,0 +1,34 @@
+# Use this file in Coolify: frontend only exposes 80 (no host port bind).
+# Coolify proxy routes by hostname to container port 80.
+# DB uses a named volume so it works on any host.
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: engageflow-backend
+    expose:
+      - "8000"
+    volumes:
+      - engageflow_db:/app/shared_db
+    environment:
+      - TZ=Europe/London
+      - ENGAGEFLOW_DB_PATH=/app/shared_db/engageflow.db
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: engageflow-frontend
+    depends_on:
+      - backend
+    environment:
+      - TZ=Europe/London
+      - PORT=80
+    expose:
+      - "80"
+    restart: unless-stopped
+
+volumes:
+  engageflow_db: {}
