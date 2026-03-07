@@ -82,7 +82,7 @@ async function resolveBackendBaseUrl(path: string): Promise<string> {
       const isLocalHost = /^(localhost|127\.0\.0\.1)$/i.test(hostname);
       if (!isLocalHost && !ENV_BASE_URL) {
         throw new Error(
-          "VITE_BACKEND_URL must be set when deployed. Set VITE_BACKEND_URL=https://engageflow-dev.up.railway.app in Railway Variables for the frontend service.",
+          "VITE_BACKEND_URL must be set when deployed (e.g. your app's public URL in Coolify/Railway frontend build env).",
         );
       }
     }

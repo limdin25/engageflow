@@ -1,5 +1,9 @@
 FROM node:20-alpine AS builder
 
+# Optional: set at build time for deployed frontends (e.g. Coolify) so API uses same origin.
+ARG VITE_BACKEND_URL
+ENV VITE_BACKEND_URL=${VITE_BACKEND_URL}
+
 WORKDIR /app
 
 COPY package*.json ./

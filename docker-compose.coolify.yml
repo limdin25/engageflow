@@ -20,6 +20,9 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Same-origin API so /api/* is proxied by nginx to backend (required when not localhost).
+        VITE_BACKEND_URL: http://pcg4ogwwg8skosscg80sk4c8.187.124.112.114.sslip.io
     container_name: engageflow-frontend
     depends_on:
       - backend
