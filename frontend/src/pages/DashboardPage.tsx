@@ -373,7 +373,7 @@ export default function DashboardPage() {
   const communitiesQuery = useCommunities();
   const queueQuery = useQueue();
   const automationSettingsQuery = useAutomationSettings();
-  const { conversations, engineStatus, logs } = useBackend();
+  const { conversations, engineStatus, logs, error: backendError, loading: backendLoading } = useBackend();
 
   const profiles = profilesQuery.data ?? [];
   const communities = communitiesQuery.data ?? [];
@@ -633,12 +633,20 @@ export default function DashboardPage() {
     }
   };
 
+  const showEmptyStateHint = !backendLoading && !backendError && profiles.length === 0;
+
   return (
     <div className="p-6 lg:p-8 pt-16 md:pt-6 max-w-7xl">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
         <p className="text-sm text-muted-foreground mt-1">Overview of your engagement automation</p>
       </div>
+
+      {showEmptyStateHint && (
+        <div className="mb-6 rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+          Database connected. Add profiles in <strong>Profiles</strong> and connect communities to start seeing data here.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <StatCard icon={Users} label="Active Profiles" value={activeProfiles} sub={`${profiles.length} total В· Cap: ${settings?.globalDailyCapPerAccount ?? "-"}/day`} color="bg-primary/10 text-primary" />
