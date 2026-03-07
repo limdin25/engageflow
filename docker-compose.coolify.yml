@@ -16,6 +16,26 @@ services:
       - ENGAGEFLOW_DB_PATH=/app/shared_db/engageflow.db
     restart: unless-stopped
 
+  joiner:
+    build:
+      context: ./joiner/backend
+      dockerfile: Dockerfile
+    container_name: engageflow-joiner
+    expose:
+      - "3100"
+    volumes:
+      - engageflow_db:/app/shared_db
+      - joiner_db:/app/data
+    environment:
+      - TZ=Europe/London
+      - PORT=3100
+      - ENGAGEFLOW_DB_PATH=/app/shared_db/engageflow.db
+      - JOINER_DB_PATH=/app/data/joiner.db
+      - ENGAGEFLOW_API=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
@@ -26,6 +46,7 @@ services:
     container_name: engageflow-frontend
     depends_on:
       - backend
+      - joiner
     environment:
       - TZ=Europe/London
       - PORT=80
@@ -35,3 +56,4 @@ services:
 
 volumes:
   engageflow_db: {}
+  joiner_db: {}
