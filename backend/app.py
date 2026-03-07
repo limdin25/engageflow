@@ -62,7 +62,9 @@ except Exception:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_AVAILABLE = False
 
-DB_PATH = Path(__file__).parent / "engageflow.db"
+DB_PATH = Path(
+    os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db"))
+)
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
