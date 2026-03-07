@@ -1,0 +1,10 @@
+{
+  "query": "mutation ServiceInstanceUpdate($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }",
+  "variables": {
+    "serviceId": "50e311ec-ab40-4467-85c2-989b009b1829",
+    "environmentId": "d488f841-2357-4946-98f1-5b7af137b17f",
+    "input": {
+      "rootDirectory": "joiner/backend"
+    }
+  }
+}

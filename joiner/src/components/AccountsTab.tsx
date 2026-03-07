@@ -34,13 +34,13 @@ function mapAuthStatus(p: any): string {
   if (p.auth_status === 'connecting') return 'Connecting';
   if (p.auth_status === 'expired') return 'Expired';
   if (p.auth_status === 'error') return 'Error';
-  if (!(p.has_cookie_json ?? p.cookie_json)) return 'Missing Cookies';
+  if (!p.cookie_json) return 'Missing Cookies';
   return 'Disconnected';
 }
 
 function mapRunStatus(p: any): string {
   if (p.is_running) return 'Running';
-  if (!(p.has_cookie_json ?? p.cookie_json)) return 'Blocked';
+  if (!p.cookie_json) return 'Blocked';
   return 'Idle';
 }
 
@@ -228,13 +228,7 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
   const handleTestAuth = async (id: string) => {
     try {
       const result = await api.testAuth(id);
-      if (result.valid) {
-        alert('✓ Auth valid');
-      } else if (result.code === 'COOKIE_EXPIRED') {
-        alert('✗ Cookie expired — re-export cookies from browser and paste or reconnect.');
-      } else {
-        alert(`✗ Auth failed: ${result.code || result.error}`);
-      }
+      alert(result.valid ? '✓ Auth valid' : `✗ Auth failed: ${result.error}`);
       fetchProfiles();
     } catch (err: any) { alert(err.message); }
   };
@@ -414,18 +408,11 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
                       <TableRow key={`${p.id}-exp`}>
                         <TableCell colSpan={6} className="bg-muted/30 p-4">
                           <div className="flex flex-col gap-4">
-                            {!(p.has_cookie_json ?? p.cookie_json) && (
-                              <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-                                <strong>Cookie not loaded</strong> for this account{p.email ? ` (${p.email})` : ''}. Add cookies via <strong>Connect</strong> (Skool password) or <strong>Paste Cookies</strong> above so Joiner can use this profile.
-                              </div>
-                            )}
                             <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
                             {/* Last Error */}
                             <div>
                               <span className="text-muted-foreground">Last Error</span>
-                              <p className="mt-1 font-medium text-destructive">
-                                {p.auth_error === 'COOKIE_EXPIRED' ? 'Cookie expired — re-export required' : (p.auth_error || p.last_auth_error || 'None')}
-                              </p>
+                              <p className="mt-1 font-medium text-destructive">{p.auth_error || p.last_auth_error || 'None'}</p>
                             </div>
                             {/* Queue Stats */}
                             <div>
@@ -510,7 +497,7 @@ export function AccountsTab({ onFilterLogs }: AccountsTabProps) {
                                   </Button>
                                 </div>
                                 {revealCookies === p.id && (
-                                  <code className="mt-1 block text-xs bg-muted p-2 rounded break-all max-h-24 overflow-auto">{p.has_cookie_json ? 'Cookies present (hidden for security)' : 'No cookies — use Paste Cookies or Connect above to load cookies for this account.'}</code>
+                                  <code className="mt-1 block text-xs bg-muted p-2 rounded break-all max-h-24 overflow-auto">{p.cookie_json || 'No cookies'}</code>
                                 )}
                               </div>
                             </div>

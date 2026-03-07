@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -8,9 +8,19 @@ export default function ConnectPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [countdown, setCountdown] = useState(30);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!loading) return;
+    setCountdown(30);
+    const id = setInterval(() => {
+      setCountdown((c) => (c > 0 ? c - 1 : 0));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [loading]);
 
   const handleConnect = async () => {
     setError("");
@@ -85,6 +95,17 @@ export default function ConnectPage() {
               {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
               Connect
             </Button>
+            {loading && (
+              <div className="flex flex-col items-center gap-2 mt-4 text-center">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-sm text-muted-foreground">Connecting</span>
+                </div>
+                <span className="text-2xl font-semibold tabular-nums text-muted-foreground">
+                  {countdown}s
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

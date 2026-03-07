@@ -220,14 +220,6 @@ const matchesSearch = (query: string, fields: Array<string | undefined | null>):
 export default function InboxPage() {
   const isMobile = useIsMobile();
   const { profiles: backendProfiles, conversations: backendConversations, labels: backendLabels, refresh } = useBackend();
-
-  useEffect(() => {
-    if (backendConversations.length === 0) {
-      api.getConversations(true).then((data) => {
-        if (data.length > 0) void refresh();
-      }).catch(() => undefined);
-    }
-  }, [backendConversations.length, refresh]);
   const [conversations, setConversations] = useState<Conversation[]>(backendConversations);
   const [labels, setLabels] = useState<Label[]>(backendLabels);
   const [selected, setSelected] = useState<Conversation | null>(null);
@@ -307,7 +299,7 @@ export default function InboxPage() {
 
   useEffect(() => {
     let active = true;
-    api.getConversations(false)
+    api.getConversations(true)
       .then(() => {
         if (!active) return;
         return refresh();

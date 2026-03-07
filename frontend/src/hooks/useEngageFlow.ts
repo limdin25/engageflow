@@ -43,10 +43,19 @@ export const useAutomationSettings = () =>
 export const useQueue = () =>
   useQuery({
     queryKey: ["queue"],
-    queryFn: () => api.getQueue(30),
-    refetchInterval: 10000,
+    queryFn: api.getQueue,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+  });
+
+export const useQueuePreview = () =>
+  useQuery({
+    queryKey: ["queuePreview"],
+    queryFn: () => api.getQueuePreview(30, 7),
+    refetchInterval: 30000,
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
 
 export const useLogs = () =>
@@ -61,10 +70,10 @@ export const useLogs = () =>
 export const useActivity = () =>
   useQuery({
     queryKey: ["activity"],
-    queryFn: () => api.getActivity(100),
+    queryFn: api.getActivity,
     refetchInterval: 5000,
     refetchIntervalInBackground: true,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
 
 export const useAnalytics = () =>

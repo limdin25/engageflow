@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { Users, MessageSquare, Sparkles, Clock, Activity, ChevronDown, ChevronUp, ExternalLink, Download, Key, CheckCircle, XCircle, Loader2 } from "lucide-react";
-import { useActivity, useAutomationSettings, useCommunities, useProfiles, useQueue } from "@/hooks/useEngageFlow";
+import { useActivity, useAutomationSettings, useCommunities, useProfiles, useQueue, useQueuePreview } from "@/hooks/useEngageFlow";
 import { ApiError, api } from "@/lib/api";
-import { dedupeActivities, interleaveByProfile } from "@/lib/activityTimeline";
 import NextActionsDrawer from "@/components/NextActionsDrawer";
 import { useBackend } from "@/context/BackendContext";
 import { toast } from "sonner";
 import type { LogEntry, QueueItem } from "@/lib/types";
 const UK_TIMEZONE = "Europe/London";
+const SERVER_TIMEZONE = "Europe/Berlin";
 
 const getDatePartsInTz = (date: Date, timeZone: string): Record<string, number> => {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -76,12 +76,12 @@ const parseServerTimestamp = (value: string): number => {
       Number(m[4]),
       Number(m[5]),
       Number(m[6]),
-      UK_TIMEZONE,
+      SERVER_TIMEZONE,
     );
   }
   const hms = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
   if (hms) {
-    const nowParts = getDatePartsInTz(new Date(), UK_TIMEZONE);
+    const nowParts = getDatePartsInTz(new Date(), SERVER_TIMEZONE);
     return zonedToEpoch(
       Number(nowParts.year || 0),
       Number(nowParts.month || 1),
@@ -89,7 +89,7 @@ const parseServerTimestamp = (value: string): number => {
       Number(hms[1]),
       Number(hms[2]),
       Number(hms[3] || 0),
-      UK_TIMEZONE,
+      SERVER_TIMEZONE,
     );
   }
   const ts = Date.parse(text);
@@ -372,18 +372,20 @@ export default function DashboardPage() {
   const activityQuery = useActivity();
   const communitiesQuery = useCommunities();
   const queueQuery = useQueue();
+  const queuePreviewQuery = useQueuePreview();
   const automationSettingsQuery = useAutomationSettings();
-  const { conversations, engineStatus, logs, error: backendError, loading: backendLoading } = useBackend();
+  const { conversations, engineStatus, logs } = useBackend();
 
   const profiles = profilesQuery.data ?? [];
   const communities = communitiesQuery.data ?? [];
   const activityFeed = activityQuery.data ?? [];
   const queue = queueQuery.data ?? [];
+  const queuePreview = queuePreviewQuery.data ?? [];
   const adjustedQueueNowMs = Math.max(0, nowMs - queueTimerPauseOffsetMs);
   const activeTask = useMemo(() => deriveActiveQueueTask(logs, nowMs), [logs, nowMs]);
   const displayActiveTask = activeTask && (nowMs - activeTask.startedAtMs) <= 20 * 1000 ? activeTask : null;
   const recentRequeueTask = useMemo(() => deriveRecentRequeueTask(logs, nowMs), [logs, nowMs]);
-  const visibleQueue = queue;
+  const visibleQueue = queue.length > 0 ? queue : queuePreview;
   const displayQueue = interleaveQueueByProfile(visibleQueue);
   const parsedQueue = visibleQueue
     .map((item) => ({
@@ -446,20 +448,6 @@ export default function DashboardPage() {
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
-  const formatNextActionCountdown = (seconds: number) => {
-    const safe = Math.max(0, seconds || 0);
-    if (safe < 60) return `Next action in ${safe}s`;
-    const m = Math.floor(safe / 60);
-    const sec = safe % 60;
-    if (m < 60) return sec > 0 ? `Next action in ${m}m ${sec}s` : `Next action in ${m}m`;
-    const h = Math.floor(m / 60);
-    const rm = m % 60;
-    if (h < 24) return rm > 0 ? `Next action in ${h}h ${rm}m` : `Next action in ${h}h`;
-    const d = Math.floor(h / 24);
-    const rh = h % 24;
-    return rh > 0 ? `Next action in ${d}d ${rh}h` : `Next action in ${d}d`;
-  };
-
   const secondsUntilNextMidnight = (() => {
     try {
       const now = new Date(nowMs);
@@ -484,14 +472,14 @@ export default function DashboardPage() {
 
   const nextCountdown = (() => {
     if (!engineStatus?.isRunning || engineStatus?.isPaused) return "Waiting for start";
-    if (connectionRest?.active) return formatNextActionCountdown(connectionRest.remainingSeconds);
-    if (displayActiveTask) return "Executing";
-    if (isWaitingSchedule && !nextQueueItem) {
+    if (connectionRest?.active) return formatCountdown(connectionRest.remainingSeconds);
+    if (isWaitingSchedule) {
       const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
-      if (sec > 0) return formatNextActionCountdown(sec);
+      if (sec > 0) return formatCountdown(sec);
       return "Starting...";
     }
-    if (!nextQueueItem) return emptyQueueReason || "No actions scheduled";
+    if (displayActiveTask) return "Executing";
+    if (!nextQueueItem) return emptyQueueReason || "--:--";
     const scheduledMs = parseQueueTimestampMs(
       String(nextQueueItem.scheduledFor || ""),
       String(nextQueueItem.scheduledTime || ""),
@@ -499,21 +487,13 @@ export default function DashboardPage() {
     );
     if (Number.isFinite(scheduledMs)) {
       const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
-      if (secondsLeft <= 0) return "Starting...";
-      return formatNextActionCountdown(secondsLeft);
-    }
-    const apiScheduled = String(engineStatus?.nextScheduledFor || "").trim();
-    if (apiScheduled) {
-      const ts = Date.parse(apiScheduled.replace(" ", "T"));
-      if (Number.isFinite(ts)) {
-        const secondsLeft = Math.floor((ts - adjustedQueueNowMs) / 1000);
-        if (secondsLeft <= 0) return "Starting...";
-        return formatNextActionCountdown(secondsLeft);
+      if (secondsLeft <= 0) {
+        return "Starting...";
       }
+      return formatCountdown(secondsLeft);
     }
-    const apiCountdown = Number(engineStatus?.countdownSeconds ?? 0);
-    if (apiCountdown <= 0) return "Starting...";
-    return formatNextActionCountdown(apiCountdown);
+    if ((engineStatus.countdownSeconds ?? 0) <= 0) return "Starting...";
+    return formatCountdown(engineStatus.countdownSeconds);
   })();
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -563,16 +543,11 @@ export default function DashboardPage() {
     if (activityFilterProfile && item.profile !== activityFilterProfile) return false;
     return true;
   });
-  const processedActivity = interleaveByProfile(dedupeActivities(filteredActivity));
-  const displayedActivity = activityExpanded ? processedActivity : processedActivity.slice(0, 30);
-  const activityLastUpdatedAt = activityQuery.dataUpdatedAt ?? 0;
-  const queueLastUpdatedAt = queueQuery.dataUpdatedAt ?? 0;
-  const newestActivityTs = filteredActivity[0] ? parseServerTimestamp(String(filteredActivity[0].timestamp || "")) : 0;
-  const newestActivityAgeMinutes = Number.isFinite(newestActivityTs) ? (Date.now() - newestActivityTs) / 60000 : Infinity;
+  const displayedActivity = activityExpanded ? filteredActivity : filteredActivity.slice(0, 6);
 
   const handleExportCSV = () => {
     const csv = "Profile,Group,Action,Timestamp,Post URL\n" +
-      processedActivity.map((a) => `"${a.profile}","${a.groupName}","${a.action}","${a.timestamp}","${a.postUrl}"`).join("\n");
+      filteredActivity.map((a) => `"${a.profile}","${a.groupName}","${a.action}","${a.timestamp}","${a.postUrl}"`).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -611,7 +586,7 @@ export default function DashboardPage() {
     setTimeout(() => setKeyTestStatus("idle"), 3000);
   };
 
-  const displayedQueue = queueExpanded ? displayQueue : displayQueue.slice(0, 30);
+  const displayedQueue = queueExpanded ? displayQueue : displayQueue.slice(0, 6);
 
   const changeQueueRoundLimit = async (delta: number) => {
     if (!settings || queueRoundSavePending) return;
@@ -633,20 +608,12 @@ export default function DashboardPage() {
     }
   };
 
-  const showEmptyStateHint = !backendLoading && !backendError && profiles.length === 0;
-
   return (
     <div className="p-6 lg:p-8 pt-16 md:pt-6 max-w-7xl">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
         <p className="text-sm text-muted-foreground mt-1">Overview of your engagement automation</p>
       </div>
-
-      {showEmptyStateHint && (
-        <div className="mb-6 rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-          Database connected. Add profiles in <strong>Profiles</strong> and connect communities to start seeing data here.
-        </div>
-      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <StatCard icon={Users} label="Active Profiles" value={activeProfiles} sub={`${profiles.length} total В· Cap: ${settings?.globalDailyCapPerAccount ?? "-"}/day`} color="bg-primary/10 text-primary" />
@@ -771,9 +738,6 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4 text-muted-foreground" />
               <h2 className="text-sm font-semibold text-foreground">Activity Timeline</h2>
-              <span className="text-[11px] text-muted-foreground">
-                Last updated: {activityLastUpdatedAt ? (Math.floor((nowMs - activityLastUpdatedAt) / 1000) < 60 ? `${Math.floor((nowMs - activityLastUpdatedAt) / 1000)}s ago` : `${Math.floor((nowMs - activityLastUpdatedAt) / 60000)}m ago`) : "—"}
-              </span>
             </div>
             <div className="flex items-center gap-2">
               <select
@@ -811,21 +775,16 @@ export default function DashboardPage() {
             {displayedActivity.length === 0 && (
               <div className="px-5 py-8 text-sm text-muted-foreground">No activity yet.</div>
             )}
-            {displayedActivity.length > 0 && newestActivityAgeMinutes >= 10 && (
-              <div className="px-5 py-2 text-[11px] text-muted-foreground border-t border-border">
-                No new activity detected in last {Math.floor(newestActivityAgeMinutes)} min. Last: {formatRelativeTime(String(filteredActivity[0]?.timestamp || ""))}
-              </div>
-            )}
           </div>
-          {!activityExpanded && processedActivity.length > 30 && (
+          {!activityExpanded && filteredActivity.length > 6 && (
             <button
               onClick={() => setActivityExpanded(true)}
               className="w-full py-2.5 text-xs text-primary hover:bg-muted/50 transition-colors border-t border-border"
             >
-              Show all {processedActivity.length} activity rows
+              Show all {filteredActivity.length} activity rows
             </button>
           )}
-          {activityExpanded && processedActivity.length > 30 && (
+          {activityExpanded && filteredActivity.length > 6 && (
             <button
               onClick={() => setActivityExpanded(false)}
               className="w-full py-2.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors border-t border-border"
@@ -840,10 +799,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <Clock className="w-4 h-4 text-muted-foreground" />
               <h2 className="text-sm font-semibold text-foreground">Action Queue</h2>
-              <span className="text-xs text-muted-foreground">({visibleQueue.length} scheduled)</span>
-              <span className="text-[11px] text-muted-foreground">
-                Updated: {queueLastUpdatedAt ? (Math.floor((nowMs - queueLastUpdatedAt) / 1000) < 60 ? `${Math.floor((nowMs - queueLastUpdatedAt) / 1000)}s ago` : `${Math.floor((nowMs - queueLastUpdatedAt) / 60000)}m ago`) : "—"}
-              </span>
+              <span className="text-xs text-muted-foreground">({queue.length > 0 ? `${visibleQueue.length} scheduled` : visibleQueue.length > 0 ? `0 queued + ${visibleQueue.length} forecast` : "0 scheduled"})</span>
               <div className="ml-2 inline-flex items-center rounded-md border border-border bg-background overflow-hidden">
                 <button
                   type="button"
@@ -868,7 +824,7 @@ export default function DashboardPage() {
                 </button>
               </div>
             </div>
-            {visibleQueue.length > 30 && (
+            {visibleQueue.length > 6 && (
               <button onClick={() => setQueueExpanded(!queueExpanded)} className="p-1.5 rounded-md hover:bg-muted transition-colors" title={queueExpanded ? "Collapse" : "Expand all"}>
                 {queueExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
               </button>
@@ -910,12 +866,12 @@ export default function DashboardPage() {
               <div className="px-5 py-8 text-sm text-muted-foreground">Queue is empty.</div>
             )}
           </div>
-          {!queueExpanded && visibleQueue.length > 30 && (
+          {!queueExpanded && visibleQueue.length > 6 && (
             <button onClick={() => setQueueExpanded(true)} className="w-full py-2.5 text-xs text-primary hover:bg-muted/50 transition-colors border-t border-border">
               {`Show all ${visibleQueue.length} scheduled actions`}
             </button>
           )}
-          {queueExpanded && visibleQueue.length > 30 && (
+          {queueExpanded && visibleQueue.length > 6 && (
             <button
               onClick={() => setQueueExpanded(false)}
               className="w-full py-2.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors border-t border-border"

@@ -1,13 +1,15 @@
 const BASE = 'https://api2.skool.com';
-const { buildCookieHeader } = require('./cookieBuilder');
-
 async function skoolRequest(cookieJson, method, endpoint, body) {
-  const built = buildCookieHeader(cookieJson);
-  const cookies = built.header || '';
-  const cookieCount = built.count || 0;
-  if (built.code) {
-    console.warn('[skoolRequest]', built.code, 'cookieCount:', cookieCount, 'endpoint:', endpoint);
+  let cookies = '';
+  let cookieCount = 0;
+  try {
+    const c = typeof cookieJson === 'string' ? JSON.parse(cookieJson) : cookieJson;
+    cookieCount = Array.isArray(c) ? c.length : 0;
+    cookies = Array.isArray(c) ? c.map(x => (x.name||'') + '=' + (x.value||'')).join('; ') : '';
+  } catch (e) {
+    console.warn('[skoolRequest] cookie parse failed:', e.message);
   }
+  console.log('[skoolRequest] cookieCount:', cookieCount, 'cookieHeaderLen:', cookies.length, 'endpoint:', endpoint);
   const opts = {
     method,
     headers: {

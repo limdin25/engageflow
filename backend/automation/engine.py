@@ -10,7 +10,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,9 +62,6 @@ AUTOMATION_FAILURE_DIAGNOSTICS_ENABLED = str(
     os.environ.get("AUTOMATION_FAILURE_DIAGNOSTICS_ENABLED", "0")
 ).strip().lower() in {"1", "true", "yes", "on"}
 LOGGER = logging.getLogger("engageflow.automation")
-
-EDITOR_WAIT_TIMEOUT_MS = 25000
-EDITOR_POST_LOAD_DELAY_MS = 3000
 
 SKOOL_SELECTORS = {
     "post_items": 'div[class*="PostItemWrapper"]',
@@ -302,14 +298,7 @@ class SkoolSessionManager:
                     self.page.wait_for_load_state("networkidle", timeout=2000)
                 except Exception:
                     pass
-                try:
-                    self.page.wait_for_selector(
-                        "div[class*='TopNav'], button[class*='ChatNotificationsIconButton'], a[href^='/@']",
-                        timeout=LOGIN_CHECK_POST_LOAD_WAIT_MS,
-                        state="visible",
-                    )
-                except Exception:
-                    pass
+                self.page.wait_for_timeout(LOGIN_CHECK_POST_LOAD_WAIT_MS)
                 navigated = True
                 break
             except Exception:
@@ -418,30 +407,8 @@ class AutomationEngine:
         self._queue_post_cooldown_until: Dict[str, float] = {}
         self._queue_community_cooldown_until: Dict[str, float] = {}
         self._prefill_skip_log_state: Dict[str, Dict[str, float]] = {}
-        self._lifecycle_trace: deque = deque(maxlen=100)
 
         self._hydrate_state_from_disk()
-
-    def _emit_lifecycle(
-        self,
-        event: str,
-        task_id: str = "",
-        profile_id: str = "",
-        action_type: str = "",
-        state: str = "",
-        **extra: Any,
-    ) -> None:
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": event,
-            "task_id": task_id,
-            "profile_id": profile_id,
-            "action_type": action_type,
-            "state": state,
-            **extra,
-        }
-        self._lifecycle_trace.append(entry)
-        LOGGER.info("[LIFECYCLE] %s task_id=%s profile_id=%s state=%s", event, task_id, profile_id, state)
     async def subscribe(self) -> asyncio.Queue[Dict[str, Any]]:
         q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=1000)
         async with self._lock:
@@ -480,26 +447,13 @@ class AutomationEngine:
                 if "password" in item:
                     item["password"] = ""
                 profiles_safe.append(item)
-            countdown = self._state.countdown_seconds
-            next_scheduled_for: Optional[str] = None
-            if (
-                self._state.is_running
-                and not self._state.is_paused
-                and not self._state.connection_rest_active
-                and self._state.run_state in ("running", "waiting_schedule")
-            ):
-                next_iso, secs = self._get_next_scheduled_for_from_queue()
-                if next_iso and secs >= 0:
-                    next_scheduled_for = next_iso
-                    countdown = secs
             return {
                 "success": True,
                 "isRunning": self._state.is_running,
                 "isPaused": self._state.is_paused,
                 "state": self._state.run_state,
                 "runState": self._state.run_state,
-                "countdownSeconds": countdown,
-                "nextScheduledFor": next_scheduled_for,
+                "countdownSeconds": self._state.countdown_seconds,
                 "connectionRest": {
                     "active": bool(self._state.connection_rest_active),
                     "remainingSeconds": int(self._state.connection_rest_remaining_seconds or 0),
@@ -562,47 +516,18 @@ class AutomationEngine:
                 if SESSION_MONITOR_ENABLED
                 else None
             )
-            try:
-                self._save_run_state_locked()
-            except Exception as e:
-                LOGGER.warning("_save_run_state_locked during start: %s", e)
+            self._save_run_state_locked()
 
-        try:
-            await self.publish_log("[SKOOL] Scheduler started", status="success")
-        except Exception:
-            pass
+        await self.publish_log("[SKOOL] Scheduler started", status="success")
         if shifted_on_start > 0:
-            try:
-                await self.publish_log(f"[SKOOL] Rescheduled {shifted_on_start} overdue queue task(s) after start", status="info")
-            except Exception:
-                pass
-        try:
-            return await self.get_status()
-        except Exception as e:
-            LOGGER.warning("get_status after start: %s", e)
-            return {
-                "success": True,
-                "isRunning": True,
-                "isPaused": False,
-                "state": "running",
-                "runState": "running",
-                "countdownSeconds": 0,
-                "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
-                "currentProfileIndex": 0,
-                "profiles": [],
-                "stats": {},
-                "activity": [],
-            }
+            await self.publish_log(f"[SKOOL] Rescheduled {shifted_on_start} overdue queue task(s) after start", status="info")
+        return await self.get_status()
 
     async def stop(self) -> Dict[str, Any]:
         task_to_wait: Optional[asyncio.Task[None]] = None
         session_task_to_wait: Optional[asyncio.Task[None]] = None
         should_log_stopped = False
-        try:
-            due_pending_before_stop = await asyncio.to_thread(self._count_due_queue_actions)
-        except Exception as e:
-            LOGGER.warning("_count_due_queue_actions during stop: %s", e)
-            due_pending_before_stop = 0
+        due_pending_before_stop = await asyncio.to_thread(self._count_due_queue_actions)
         async with self._lock:
             should_log_stopped = bool(self._state.is_running or self._state.run_state != "idle")
             self._state.is_running = False
@@ -614,17 +539,12 @@ class AutomationEngine:
             self._state.connection_rest_rounds_completed = 0
             task_to_wait = self._task
             session_task_to_wait = self._session_task
-            try:
-                self._save_run_state_locked()
-            except Exception as e:
-                LOGGER.warning("_save_run_state_locked during stop: %s", e)
+            self._save_run_state_locked()
         if task_to_wait and not task_to_wait.done():
             try:
                 await asyncio.wait_for(task_to_wait, timeout=5)
             except asyncio.TimeoutError:
                 task_to_wait.cancel()
-            except asyncio.CancelledError:
-                pass
             except Exception:
                 pass
         async with self._lock:
@@ -635,46 +555,22 @@ class AutomationEngine:
                 await asyncio.wait_for(session_task_to_wait, timeout=5)
             except asyncio.TimeoutError:
                 session_task_to_wait.cancel()
-            except asyncio.CancelledError:
-                pass
             except Exception:
                 pass
         async with self._lock:
             if self._session_task is session_task_to_wait:
                 self._session_task = None
         if due_pending_before_stop > 0:
-            try:
-                await self.publish_log(
-                    (
-                        "[SKOOL] Pending due tasks left unprocessed: "
-                        f"{due_pending_before_stop} reason=scheduler_stopped_before_due_execution"
-                    ),
-                    status="retry",
-                )
-            except Exception:
-                pass
+            await self.publish_log(
+                (
+                    "[SKOOL] Pending due tasks left unprocessed: "
+                    f"{due_pending_before_stop} reason=scheduler_stopped_before_due_execution"
+                ),
+                status="retry",
+            )
         if should_log_stopped:
-            try:
-                await self.publish_log("[SKOOL] Scheduler stopped", status="info")
-            except Exception:
-                pass
-        try:
-            return await self.get_status()
-        except Exception as e:
-            LOGGER.warning("get_status after stop: %s", e)
-            return {
-                "success": True,
-                "isRunning": False,
-                "isPaused": False,
-                "state": "idle",
-                "runState": "idle",
-                "countdownSeconds": 0,
-                "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
-                "currentProfileIndex": 0,
-                "profiles": [],
-                "stats": {},
-                "activity": [],
-            }
+            await self.publish_log("[SKOOL] Scheduler stopped", status="info")
+        return await self.get_status()
 
     async def shutdown(self, preserve_run_state: bool = True) -> None:
         task_to_wait: Optional[asyncio.Task[None]] = None
@@ -1523,7 +1419,6 @@ class AutomationEngine:
                     self._state.stats["total_skipped"] += run_result.skipped_count
                     self._state.stats["total_blacklisted"] += run_result.blacklisted_count
                     self._state.activity_rows.extend(run_result.activity_rows)
-                    self._emit_lifecycle("PERSIST_ACTIVITY_SHOULD_BE_CALLED", profile_id=str(applied_profile.get("id", "") or ""), action_type="", state="before_persist", row_count=len(run_result.activity_rows))
                     self._persist_activity_rows(run_result.activity_rows)
                     self._update_profile_locked(applied_profile)
                     self._save_run_state_locked()
@@ -2033,7 +1928,6 @@ class AutomationEngine:
                 limit=max(1, int(profile.get("repliesPerVisit", 1)) * 4),
             ) if not scan_only else []
             result.due_queue_items_seen = len(due_queue_items)
-            self._emit_lifecycle("DUE_QUEUE_ITEMS_LOADED", profile_id=str(profile_id or ""), action_type="", state="loaded", count=len(due_queue_items))
             if not scan_only:
                 self._insert_log(
                     {
@@ -2559,7 +2453,6 @@ class AutomationEngine:
                     )
 
                 if not scan_only:
-                    self._emit_lifecycle("ELIGIBLE_POSTS_BUILT", profile_id=str(profile_id or ""), action_type="", state="built", count=len(eligible_posts), from_queue=sum(1 for p in eligible_posts if p.get("from_queue")))
                     comment_posted = False
                     removed_due_existing_comment = 0
 
@@ -2655,13 +2548,10 @@ class AutomationEngine:
                         try:
                             post_url = selected["post_url"]
                             task_ref = str(selected.get("queue_id") or _extract_task_ref_from_post_url(post_url) or "n/a")
-                            if bool(selected.get("from_queue")):
-                                self._emit_lifecycle("TASK_PICKED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="picked")
                             if bool(selected.get("from_queue")) and not bool(selected.get("_queue_claimed")):
                                 # Remove active task from queue immediately when execution starts.
                                 self._remove_queue_item(profile_id, post_url)
                                 selected["_queue_claimed"] = True
-                                self._emit_lifecycle("TASK_STARTED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="running")
                             self._insert_log(
                                 {
                                     "id": str(uuid.uuid4()),
@@ -2921,7 +2811,7 @@ class AutomationEngine:
                                     "message": f"[SKOOL] WRITING COMMENT task={task_ref} chars={len(ai_reply)}",
                                 }
                             )
-                            editor = self._ensure_comment_editor(page, timeout_ms=EDITOR_WAIT_TIMEOUT_MS)
+                            editor = self._ensure_comment_editor(page, timeout_ms=15000)
                             if not editor:
                                 raise RuntimeError("send_or_dom_error:editor_not_visible")
                             editor.click()
@@ -2941,31 +2831,9 @@ class AutomationEngine:
                             sent, send_reason = self._submit_comment_with_fallback(page, ai_reply)
                             if not sent:
                                 raise RuntimeError(f"send_or_dom_error:{send_reason}")
-                            activity_row = {
-                                "id": str(uuid.uuid4()),
-                                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                                "profileLabel": profile_label,
-                                "profileId": profile_id,
-                                "community": community_url,
-                                "keywordMatched": matched_kw or "",
-                                "matchSource": "keyword" if is_kw else "general",
-                                "postSnippet": reply_source_text[:200],
-                                "promptUsed": prompt_to_use,
-                                "aiReply": ai_reply,
-                                "postUrl": post_url,
-                                "result": "Commented",
-                                "skipReason": "",
-                            }
-                            result.activity_rows.append(activity_row)
-                            try:
-                                self._persist_activity_rows([activity_row])
-                            except Exception as log_exc:
-                                LOGGER.warning("Failed to log activity for task=%s: %s", (task_ref or "")[:8], log_exc)
                             if not self._verify_comment_published(page, profile, ai_reply):
-                                LOGGER.warning(
-                                    "Comment posted but verify failed task=%s (activity already logged)",
-                                    task_ref[:8] if task_ref else "n/a",
-                                )
+                                raise RuntimeError("send_or_dom_error:post_submit_not_verified")
+
                             self._add_to_blacklist(post_url, blacklist, reply_source_text)
                             self._save_blacklist(blacklist)
                             _clear_queue_network_failure(post_url)
@@ -2979,7 +2847,21 @@ class AutomationEngine:
                                 community_id=community.get("id", ""),
                                 is_keyword_match=bool(is_kw),
                             )
-                            self._emit_lifecycle("TASK_COMPLETED", task_id=task_ref, profile_id=str(profile_id or ""), action_type="comment", state="completed")
+                            result.activity_rows.append({
+                                "id": str(uuid.uuid4()),
+                                "timestamp": datetime.now().isoformat(),
+                                "profileLabel": profile_label,
+                                "profileId": profile_id,
+                                "community": community_url,
+                                "keywordMatched": matched_kw or "",
+                                "matchSource": "keyword" if is_kw else "general",
+                                "postSnippet": reply_source_text[:200],
+                                "promptUsed": prompt_to_use,
+                                "aiReply": ai_reply,
+                                "postUrl": post_url,
+                                "result": "Commented",
+                                "skipReason": "",
+                            })
                             self._remove_queue_item(profile_id, post_url)
                             norm_post_url = self._normalize_url(post_url)
                             if norm_post_url:
@@ -3018,8 +2900,6 @@ class AutomationEngine:
                             if community_daily_limit and community_actions_today >= community_daily_limit:
                                 break
                         except Exception as exc:
-                            task_ref_fail = str(selected.get("queue_id") or _extract_task_ref_from_post_url(post_url) or "n/a")
-                            self._emit_lifecycle("TASK_FAILED", task_id=task_ref_fail, profile_id=str(profile_id or ""), action_type="comment", state="failed", error=str(exc)[:200])
                             err_text = str(exc or "").strip().lower()
                             send_error_detail = ""
                             if err_text.startswith("send_or_dom_error:"):
@@ -3738,55 +3618,6 @@ class AutomationEngine:
         except Exception:
             return 1
 
-    def _get_next_scheduled_for_from_queue(self) -> Tuple[Optional[str], int]:
-        """Return (scheduled_for_iso, seconds_until) for earliest future queue item. (None, 0) if none.
-        Uses julianday() for robust datetime comparison across formats (T vs space, Z vs +00:00)."""
-        try:
-            now_dt = datetime.now(timezone.utc)
-            now_iso = now_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-            with self._db() as db:
-                row = db.execute(
-                    """
-                    SELECT id, profileId, scheduledFor FROM queue_items
-                    WHERE julianday(scheduledFor) > julianday(?)
-                    ORDER BY julianday(scheduledFor) ASC, id ASC
-                    LIMIT 1
-                    """,
-                    (now_iso,),
-                ).fetchone()
-            if not row or not row.get("scheduledFor"):
-                return (None, 0)
-            raw = str(row["scheduledFor"] or "").strip()
-            if not raw:
-                return (None, 0)
-            target = None
-            for candidate in [raw, raw.replace(" ", "T") + "Z"]:
-                try:
-                    s = candidate.replace("Z", "+00:00")
-                    target = datetime.fromisoformat(s)
-                    if target.tzinfo is None:
-                        target = target.replace(tzinfo=timezone.utc)
-                    break
-                except Exception:
-                    continue
-            if target is None:
-                return (None, 0)
-            delta = (target - now_dt).total_seconds()
-            eta_secs = max(0, int(delta))
-            action_id = row.get("id") if row else None
-            profile_id = row.get("profileId") if row else None
-            LOGGER.info(
-                "SCHED_DECISION profile_id=%s action_id=%s next_run_at=%s eta_seconds=%s db_path=%s decision_reason=queue_earliest_future",
-                profile_id,
-                action_id,
-                raw,
-                eta_secs,
-                str(self.db_path),
-            )
-            return (raw, eta_secs)
-        except Exception:
-            return (None, 0)
-
     def _count_pending_queue_for_profile(self, profile_id: str) -> int:
         pid = str(profile_id or "").strip()
         if not pid:
@@ -4180,16 +4011,7 @@ class AutomationEngine:
 
     def _persist_activity_rows(self, activity_rows: List[Dict[str, Any]]) -> None:
         if not activity_rows:
-            self._emit_lifecycle("ACTIVITY_LOGGED", task_id="", profile_id="", action_type="", state="skipped_empty")
             return
-        for row in activity_rows:
-            self._emit_lifecycle(
-                "ACTIVITY_LOGGED",
-                task_id=str(row.get("postUrl", row.get("id", ""))),
-                profile_id=str(row.get("profileId", "")),
-                action_type=str(row.get("result", "Commented")),
-                state="persisted",
-            )
         with self._db() as db:
             db.execute(
                 """
@@ -4208,16 +4030,12 @@ class AutomationEngine:
             )
             for row in activity_rows:
                 event_id = row.get("id", str(uuid.uuid4()))
+                profile_label = row.get("profileLabel", "")
                 profile_id = str(row.get("profileId") or "").strip()
-                # Use canonical profiles.name only; never profileLabel for activity_feed.profile.
-                profile_for_feed = "SYSTEM"
                 if profile_id:
                     name_row = db.execute("SELECT name FROM profiles WHERE id = ?", (profile_id,)).fetchone()
                     if name_row and name_row["name"]:
-                        profile_for_feed = str(name_row["name"])
-                    else:
-                        profile_for_feed = "SYSTEM"  # UUID never matches profiles.name JOIN
-                ts_val = row.get("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+                        profile_label = str(name_row["name"])
                 db.execute(
                     """
                     INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl)
@@ -4225,19 +4043,12 @@ class AutomationEngine:
                     """,
                     (
                         event_id,
-                        profile_for_feed,
+                        profile_label or row.get("profileLabel", ""),
                         row.get("community", ""),
                         row.get("result", "Commented"),
-                        ts_val,
+                        row.get("timestamp", datetime.now().isoformat()),
                         row.get("postUrl", ""),
                     ),
-                )
-                LOGGER.info(
-                    "ACT_WRITE action_id=%s timestamp=%s db_path=%s row_id=%s",
-                    event_id,
-                    ts_val,
-                    str(self.db_path),
-                    event_id,
                 )
                 db.execute(
                     """
@@ -4364,7 +4175,6 @@ class AutomationEngine:
         canonical_post_url = self._normalize_url(post_url) or str(post_url or "").strip()
         if not canonical_post_url:
             return
-        self._emit_lifecycle("QUEUE_ITEM_REMOVED", task_id=canonical_post_url[:80], profile_id=str(profile_id or ""), action_type="queue", state="removed")
         with self._db() as db:
             rows = db.execute(
                 "SELECT id, postId FROM queue_items WHERE profileId = ?",
@@ -4764,7 +4574,6 @@ class AutomationEngine:
             "current_profile_index": self._state.current_profile_index,
             "last_updated": datetime.now().isoformat(),
         }
-        self.run_state_file.parent.mkdir(parents=True, exist_ok=True)
         with self.run_state_file.open("w", encoding="utf-8") as f:
             json.dump(payload, f)
 
@@ -5137,22 +4946,14 @@ class AutomationEngine:
         except Exception:
             return
 
-    def _ensure_comment_editor(self, page: Any, timeout_ms: Optional[int] = None) -> Optional[Any]:
+    def _ensure_comment_editor(self, page: Any, timeout_ms: int = 15000) -> Optional[Any]:
         # Skool sometimes renders the post but delays/misses mounting the inline editor.
-        # Wait for Skool to fully load before first editor check.
-        timeout_ms = timeout_ms if timeout_ms is not None else EDITOR_WAIT_TIMEOUT_MS
-        try:
-            page.wait_for_timeout(EDITOR_POST_LOAD_DELAY_MS)
-        except Exception:
-            pass
+        # Try to activate the comment composer before giving up on the task.
+        deadline = time.time() + max(4.0, float(timeout_ms) / 1000.0)
         selectors = [
             SKOOL_SELECTORS.get("comment_editor") or 'div[contenteditable="true"].tiptap.ProseMirror',
-            'div.tiptap.ProseMirror[contenteditable="true"]',
-            '[data-placeholder*="comment"][contenteditable="true"]',
             'div[contenteditable="true"]',
-            'textarea[placeholder*="comment"]',
         ]
-        deadline = time.time() + max(4.0, float(timeout_ms) / 1000.0)
         while time.time() < deadline:
             for selector in selectors:
                 if not selector:
@@ -5160,7 +4961,6 @@ class AutomationEngine:
                 try:
                     editor = page.wait_for_selector(selector, timeout=1200, state="visible")
                     if editor:
-                        LOGGER.info("Editor found with selector: %s", selector)
                         return editor
                 except Exception:
                     continue
@@ -5198,25 +4998,6 @@ class AutomationEngine:
                 page.wait_for_timeout(450)
             except Exception:
                 break
-        try:
-            page_state = page.evaluate(
-                """
-                () => {
-                  const editables = document.querySelectorAll('[contenteditable="true"]');
-                  const buttons = Array.from(document.querySelectorAll('button'))
-                    .filter(b => (b.textContent || "").toLowerCase().includes('comment'))
-                    .map(b => (b.textContent || "").trim());
-                  return {
-                    editables_count: editables.length,
-                    comment_buttons: buttons,
-                    url: window.location.href
-                  };
-                }
-                """
-            )
-            LOGGER.warning("Editor not found. Page state: %s", page_state)
-        except Exception:
-            pass
         return None
 
     def _editor_contains_snippet(self, page: Any, snippet: str) -> bool:

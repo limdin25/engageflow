@@ -55,12 +55,11 @@ export function BackendProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     const loadingGuard = globalThis.setTimeout(() => setLoading(false), 15000);
     try {
-      const syncInbox = conversations.length === 0;
       const [profilesRes, communitiesRes, conversationsRes, labelsRes, keywordRulesRes, automationSettingsRes, logsRes, statusRes] =
         await Promise.allSettled([
           api.getProfiles(),
           api.getCommunities(),
-          api.getConversations(syncInbox),
+          api.getConversations(false),
           api.getLabels(),
           api.getKeywordRules(),
           api.getAutomationSettings(),
@@ -100,7 +99,7 @@ export function BackendProvider({ children }: { children: React.ReactNode }) {
       globalThis.clearTimeout(loadingGuard);
       setLoading(false);
     }
-  }, [conversations.length]);
+  }, []);
 
   useEffect(() => {
     void refresh();

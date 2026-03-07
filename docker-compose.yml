@@ -1,18 +1,16 @@
 services:
   backend:
-    # volumes bind-mount removed for production; use docker-compose.dev.yml for dev
     # Internal API service. Not published to host to avoid direct :8000 access.
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: engageflow-backend
+    container_name: skool-backend
     expose:
       - "8000"
     volumes:
-      - /root/engageflow-shared:/app/shared_db
+      - ./backend:/app
     environment:
       - TZ=Europe/London
-      - ENGAGEFLOW_DB_PATH=/app/shared_db/engageflow.db
     restart: unless-stopped
 
   frontend:
@@ -20,12 +18,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: engageflow-frontend
+    container_name: skool-frontend
     depends_on:
       - backend
     environment:
       - TZ=Europe/London
-      - PORT=80
     ports:
       - "80:80"
     restart: unless-stopped

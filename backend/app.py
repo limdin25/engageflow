@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -8,12 +9,9 @@ import os
 import re
 import shutil
 import sqlite3
-import tarfile
-import tempfile
 import threading
 import time
 import uuid
-from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
@@ -21,14 +19,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import requests
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from security_utils import decrypt_secret, encrypt_secret, is_encrypted_secret, mask_secret
 from proxy_slots import acquire_proxy_slot, release_proxy_slot
+from joiner import ensure_joiner_tables, create_joiner_router, joiner_worker_loop
 
 
 def _load_local_env_file() -> None:
@@ -63,17 +62,14 @@ except Exception:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_AVAILABLE = False
 
-DB_PATH = Path(os.environ.get("ENGAGEFLOW_DB_PATH", str(Path(__file__).parent / "engageflow.db")))
-ENGAGEFLOW_AUTOMATION_ENABLED = str(os.environ.get("ENGAGEFLOW_AUTOMATION_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
-ENGAGEFLOW_DEBUG = str(os.environ.get("ENGAGEFLOW_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+DB_PATH = Path(__file__).parent / "engageflow.db"
 LOGGER = logging.getLogger("engageflow")
 LOG_LEVEL = str(os.environ.get("ENGAGEFLOW_LOG_LEVEL", "INFO")).strip().upper() or "INFO"
 LOG_RETENTION_DAYS = max(1, int(os.environ.get("ENGAGEFLOW_LOG_RETENTION_DAYS", "14")))
 LOG_DIR = Path(os.environ.get("ENGAGEFLOW_LOG_DIR", str(Path(__file__).parent / "logs")))
-_RECENT_ERRORS: deque = deque(maxlen=50)
 SKOOL_CHAT_IMPORT_PREFIX = "skool-chat-"
 SKOOL_CHAT_IMPORT_MESSAGE_PREFIX = "skool-msg-"
-SKOOL_CHAT_BACKGROUND_SYNC_ENABLED = str(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_ENABLED", "1" if ENGAGEFLOW_AUTOMATION_ENABLED else "0")).strip().lower() in {"1", "true", "yes", "on"}
+SKOOL_CHAT_BACKGROUND_SYNC_ENABLED = str(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 SKOOL_CHAT_STRICT_IDENTITY_CHECK = str(os.environ.get("SKOOL_CHAT_STRICT_IDENTITY_CHECK", "1")).strip().lower() in {"1", "true", "yes", "on"}
 SKOOL_CHAT_SYNC_TTL_SECONDS = max(120, int(os.environ.get("SKOOL_CHAT_SYNC_TTL_SECONDS", "180")))
 SKOOL_CHAT_BACKGROUND_SYNC_INITIAL_DELAY_SECONDS = max(15, int(os.environ.get("SKOOL_CHAT_BACKGROUND_SYNC_INITIAL_DELAY_SECONDS", "60")))
@@ -102,8 +98,6 @@ _SKOOL_CHAT_IMPORT_CACHE: Dict[str, Any] = {
     "dm_log_last": {},
 }
 _SKOOL_CHAT_SYNC_LOCK = threading.Lock()
-_LOG_BUFFER: List[Dict[str, Any]] = []
-_LOG_BUFFER_LOCK = threading.Lock()
 _PLAYWRIGHT_SYNC_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE_LOCK = threading.Lock()
 _SKOOL_DM_SEND_DEDUPE: Dict[str, float] = {}
@@ -125,38 +119,6 @@ _DAILY_COUNTERS_RESET_LOCK = threading.Lock()
 DB_WRITE_RETRY_ATTEMPTS = 8
 DB_WRITE_RETRY_SLEEP_SECONDS = 0.08
 APP_BOOT_TS = time.time()
-
-def _read_build_fingerprint() -> Dict[str, str]:
-    """Runtime fingerprint: git_sha from RAILWAY_GIT_COMMIT_SHA or .git_sha file, build_time from env or .build_time file."""
-    git_sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("ENGAGEFLOW_GIT_SHA")
-    if not git_sha:
-        try:
-            p = Path(__file__).parent / ".git_sha"
-            if p.exists():
-                git_sha = p.read_text().strip() or "unknown"
-            else:
-                git_sha = "unknown"
-        except Exception:
-            git_sha = "unknown"
-    build_time = os.environ.get("ENGAGEFLOW_BUILD_TIME")
-    if not build_time:
-        try:
-            p = Path(__file__).parent / ".build_time"
-            if p.exists():
-                build_time = p.read_text().strip()
-        except Exception:
-            pass
-    if not build_time:
-        from datetime import datetime, timezone
-        build_time = datetime.fromtimestamp(APP_BOOT_TS, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {
-        "git_sha": git_sha,
-        "build_time_utc": build_time,
-        "service_name": os.environ.get("RAILWAY_SERVICE_NAME", "engageflow"),
-    }
-
-
-_BUILD_INFO = _read_build_fingerprint()
 PROFILE_LOGIN_MONITOR_ENABLED = str(os.environ.get("PROFILE_LOGIN_MONITOR_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 PROFILE_LOGIN_MONITOR_INTERVAL_SECONDS = max(1800, int(os.environ.get("PROFILE_LOGIN_MONITOR_INTERVAL_SECONDS", "7200")))
 DETAILED_TRACE_LOGS_ENABLED = str(os.environ.get("DETAILED_TRACE_LOGS_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -217,38 +179,13 @@ def _setup_application_logging() -> None:
 _setup_application_logging()
 
 
-def _is_db_writable() -> bool:
-    """Check if DB path is writable (for automation)."""
-    try:
-        p = Path(DB_PATH)
-        if not p.exists():
-            return p.parent.exists() and os.access(p.parent, os.W_OK)
-        return os.access(str(p), os.W_OK)
-    except Exception:
-        return False
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.automation_engine = AutomationEngine(DB_PATH, Path(__file__).parent)
     await app.state.automation_engine.recover_after_restart()
-    if ENGAGEFLOW_AUTOMATION_ENABLED:
-        if not _is_db_writable():
-            LOGGER.warning("ENGAGEFLOW_AUTOMATION_ENABLED=1 but DB path %s not writable; scheduler will not auto-start", DB_PATH)
-        else:
-            with get_db() as db:
-                settings = _load_or_create_automation_settings(db)
-                if not settings.masterEnabled:
-                    LOGGER.info("Auto-start suppressed by DB flag (masterEnabled=false)")
-            if settings.masterEnabled:
-                engine = app.state.automation_engine
-                try:
-                    status = await engine.get_status()
-                    if not bool((status or {}).get("isRunning")):
-                        await engine.start()
-                        LOGGER.info("Automation scheduler auto-started (ENGAGEFLOW_AUTOMATION_ENABLED=1)")
-                except RuntimeError as exc:
-                    LOGGER.warning("Automation auto-start skipped: %s", exc)
+    global _AUTOMATION_ENGINE_REF
+    _AUTOMATION_ENGINE_REF = app.state.automation_engine
+    # app.state.automation_engine.set_ensure_profile_auth(ensure_profile_auth)  # disabled - engine lacks method
     app.state.profile_login_monitor_task = asyncio.create_task(
         _profile_login_monitor_loop(app),
         name="profile-login-monitor",
@@ -259,6 +196,11 @@ async def lifespan(app: FastAPI):
             _skool_chat_sync_loop(),
             name="skool-chat-sync",
         )
+    # Phase 3 — Joiner background worker (no-op when JOINER_ENABLED=false)
+    app.state.joiner_worker_task = asyncio.create_task(
+        joiner_worker_loop(get_db),
+        name="joiner-worker",
+    )
     try:
         yield
     finally:
@@ -274,6 +216,13 @@ async def lifespan(app: FastAPI):
             monitor_task.cancel()
             try:
                 await monitor_task
+            except asyncio.CancelledError:
+                pass
+        joiner_task = getattr(app.state, "joiner_worker_task", None)
+        if joiner_task:
+            joiner_task.cancel()
+            try:
+                await joiner_task
             except asyncio.CancelledError:
                 pass
         try:
@@ -293,69 +242,26 @@ app.add_middleware(
 )
 
 
-def _is_automation_control(path: str) -> bool:
-    """True if path is an automation control endpoint (stop, status, start, pause, resume)."""
-    p = (path or "").lower()
-    return "automation" in p and any(x in p for x in ("/stop", "/status", "/start", "/pause", "/resume"))
-
-
-# Routes defined WITH /api prefix - do not strip (they match as-is)
-_API_PREFIX_ROUTES = frozenset(["/api/diagnostics", "/api/db-status", "/api/logs"])
-
-
 @app.middleware("http")
-async def strip_api_prefix_middleware(request: Request, call_next):
-    """
-    Strip /api prefix from request path for frontend compatibility.
-    Frontend calls /api/*, backend routes are /* (no prefix).
-    Example: /api/communities → /communities
-    Routes defined with /api (diagnostics, db-status, logs) are excluded.
-    """
-    path = request.url.path
-    if path.startswith("/api/") and path not in _API_PREFIX_ROUTES:
-        new_path = path[4:]
-        request.scope["path"] = new_path
-        request.scope["raw_path"] = new_path.encode()
-    response = await call_next(request)
-    return response
-
-
-@app.middleware("http")
-# Request correlation + logging. Generates request_id, adds X-Request-Id and X-EngageFlow-Git-Sha headers.
+# Log each request with status code and latency for diagnostics.
 async def request_logging_middleware(request: Request, call_next):
-    request_id = str(uuid.uuid4())[:8]
-    request.state.request_id = request_id
     started = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - started) * 1000
         LOGGER.exception(
-            "HTTP %s %s -> 500 (%.1fms) request_id=%s",
+            "HTTP %s %s -> 500 (%.1fms)",
             request.method,
             request.url.path,
             elapsed_ms,
-            request_id,
         )
         raise
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     status_code = int(getattr(response, "status_code", 0) or 0)
-    if hasattr(response, "headers"):
-        response.headers["X-Request-Id"] = request_id
-        response.headers["X-EngageFlow-Git-Sha"] = _BUILD_INFO["git_sha"]
-    if _is_automation_control(request.url.path):
-        LOGGER.info(
-            "AUTOMATION_CTRL %s %s -> %s request_id=%s git_sha=%s",
-            request.method,
-            request.url.path,
-            status_code,
-            request_id,
-            _BUILD_INFO["git_sha"][:7],
-        )
-    else:
-        log_fn = LOGGER.warning if status_code >= 400 else LOGGER.info
-        log_fn("HTTP %s %s -> %s (%.1fms)", request.method, request.url.path, status_code, elapsed_ms)
+    log_fn = LOGGER.warning if status_code >= 400 else LOGGER.info
+    log_fn("HTTP %s %s -> %s (%.1fms)", request.method, request.url.path, status_code, elapsed_ms)
     return response
 
 
@@ -385,29 +291,14 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
 
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    """
-    Global exception handler - returns 200 with error payload instead of 500.
-    This allows UI to parse response body and display specific error messages
-    instead of triggering generic "Internal server error" toast.
-    """
-    request_id = getattr(request.state, "request_id", "unknown")
-    LOGGER.exception(
-        "Unhandled backend exception: %s %s request_id=%s",
-        request.method,
-        request.url.path,
-        request_id,
-        exc_info=exc,
-    )
-    exc_type = type(exc).__name__
-    exc_msg = str(exc)[:200] if exc else ""
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    LOGGER.exception("Unhandled backend exception", exc_info=exc)
     return JSONResponse(
-        status_code=200,
+        status_code=500,
         content={
             "success": False,
             "error": "internal_error",
-            "message": f"Request failed: {exc_type}" + (f" - {exc_msg}" if exc_msg else ""),
-            "request_id": request_id,
+            "message": "Internal server error",
         },
     )
 
@@ -428,467 +319,108 @@ def get_db():
         conn.close()
 
 
+# Joiner router (Phase 2 — DB + API skeleton, no Playwright)
+app.include_router(create_joiner_router(get_db))
+
 def get_automation_engine(request: Request) -> AutomationEngine:
     return request.app.state.automation_engine
 
+_AUTOMATION_ENGINE_REF: Optional[AutomationEngine] = None
 
-def _require_joiner_secret(request: Request) -> None:
-    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
-    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
-    if not expected or secret != expected:
-        raise HTTPException(401, "Unauthorized")
+SKOOL_AUTH_CHECK_URL = "https://api2.skool.com/self/groups?offset=0&limit=1&prefs=false&members=true"
 
 
-@app.get("/internal/joiner/profiles-cookies")
-def internal_joiner_profiles_cookies(request: Request):
-    """Internal: return all profiles with cookie_json for Joiner sync by email. Requires X-JOINER-SECRET. Never logs cookie contents."""
-    _require_joiner_secret(request)
+def ensure_profile_auth(profile_id: str) -> dict:
+    """Shared auth gate. Returns {ok, cookie_json, status, message, refresh_attempted, refresh_result}.
+    Used by fetch, join, comment flows. One retry on 401/403."""
+    import urllib.request
+    import urllib.error
+    result = {"ok": False, "cookie_json": None, "status": "unknown", "message": "", "refresh_attempted": False, "refresh_result": None}
     with get_db() as db:
-        rows = db.execute(
-            "SELECT email, cookie_json FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
-        ).fetchall()
-    profiles = [{"email": (r["email"] or "").strip() or None, "cookie_json": r["cookie_json"]} for r in rows]
-    LOGGER.info("internal/joiner/profiles-cookies returned %s profile(s) with cookies", len(profiles))
-    return {"profiles": profiles}
-
-
-@app.get("/internal/joiner/debug-profiles")
-def internal_joiner_debug_profiles(request: Request):
-    """Debug: email + LENGTH(cookie_json) for all profiles. Requires X-JOINER-SECRET. No cookie content."""
-    _require_joiner_secret(request)
-    with get_db() as db:
-        rows = db.execute("SELECT email, LENGTH(cookie_json) AS cookie_json_length FROM profiles").fetchall()
-    return {"rows": [{"email": r["email"], "cookie_json_length": r["cookie_json_length"]} for r in rows]}
-
-
-@app.get("/internal/joiner/profiles/{profile_id}/cookie")
-def internal_joiner_profile_cookie(profile_id: str, request: Request):
-    """Internal: return cookie_json for Joiner sync. Requires X-JOINER-SECRET header. Never logs cookie contents."""
-    _require_joiner_secret(request)
-    with get_db() as db:
-        row = db.execute(
-            "SELECT cookie_json FROM profiles WHERE id = ?",
-            (profile_id,),
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "Profile not found")
-    cookie_json = (row["cookie_json"] or "").strip() or None
-    has_cookie = cookie_json is not None and len(cookie_json) > 0
-    LOGGER.info("internal/joiner/cookie profile_id=%s has_cookie=%s", profile_id, has_cookie)
-    return {"cookie_json": cookie_json}
-
-
-@app.put("/internal/joiner/profiles/{profile_id}/cookie")
-def internal_joiner_profile_cookie_put(profile_id: str, request: Request, body: dict = Body(default={})):
-    """Internal: store cookie_json from Joiner Connect/paste. Requires X-JOINER-SECRET. Never logs cookie contents."""
-    _require_joiner_secret(request)
-    cookie_json = (body.get("cookie_json") or "").strip() or None
-    with get_db() as db:
-        exists = db.execute("SELECT 1 FROM profiles WHERE id = ?", (profile_id,)).fetchone()
-        if not exists:
-            raise HTTPException(404, "Profile not found")
-        db.execute("UPDATE profiles SET cookie_json = ? WHERE id = ?", (cookie_json or "", profile_id))
-        db.commit()
-    has_cookie = cookie_json is not None and len(cookie_json) > 0
-    LOGGER.info("internal/joiner/cookie PUT profile_id=%s has_cookie=%s", profile_id, has_cookie)
-    return {"ok": True}
-
-
-def _require_internal_restore_auth(request: Request) -> None:
-    """Require X-JOINER-SECRET and ENGAGEFLOW_DEBUG=1 for backup/restore. Never log DB bytes or cookie_json."""
-    if not ENGAGEFLOW_DEBUG:
-        raise HTTPException(404, "Not found")
-    expected = (os.environ.get("ENGAGEFLOW_JOINER_SECRET") or "").strip()
-    secret = (request.headers.get("X-JOINER-SECRET") or "").strip()
-    if not expected or secret != expected:
-        raise HTTPException(401, "Unauthorized")
-
-
-@app.get("/internal/backup-db")
-def internal_backup_db(request: Request):
-    """Create tarball of current DB at ENGAGEFLOW_DB_PATH (and -wal/-shm if present). Returns gzip. Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1."""
-    _require_internal_restore_auth(request)
-    db_path = Path(DB_PATH)
-    data_dir = db_path.parent
-    base = db_path.name
-    patterns = [base, f"{base}-wal", f"{base}-shm"]
-    out_path = Path(tempfile.gettempdir()) / "railway_engageflow_db_backup.tar.gz"
+        row = db.execute("SELECT id, cookie_json, email, password FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not row:
+            result["status"] = "profile_not_found"
+            result["message"] = "Profile not found"
+            return result
+        cookie_json = (row["cookie_json"] or "").strip() if row["cookie_json"] else ""
+        if not cookie_json:
+            result["status"] = "login_required"
+            result["message"] = "No cookies / not logged in"
+            return result
+    cookies = _cookies_from_json(cookie_json)
+    if not cookies:
+        result["status"] = "login_required"
+        result["message"] = "No cookies / not logged in"
+        return result
+    headers = {
+        "Cookie": cookies,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://www.skool.com",
+        "Referer": "https://www.skool.com/",
+    }
+    req = urllib.request.Request(SKOOL_AUTH_CHECK_URL, headers=headers, method="GET")
+    got_401_403 = False
     try:
-        with tarfile.open(out_path, "w:gz") as tf:
-            for name in patterns:
-                p = data_dir / name
-                if p.exists():
-                    tf.add(p, arcname=name)
-        if not out_path.exists() or out_path.stat().st_size == 0:
-            raise HTTPException(500, "Backup produced empty file")
-        return FileResponse(out_path, filename="railway_engageflow_db_backup.tar.gz", media_type="application/gzip")
-    except HTTPException:
-        raise
-    except Exception as e:
-        LOGGER.exception("backup-db failed")
-        raise HTTPException(500, str(e))
-
-
-class RestoreDbBody(BaseModel):
-    url: str
-
-
-def _do_restore_sync(url: str, data_dir: Path) -> None:
-    """Run in background thread: download archive and extract to data_dir."""
-    try:
-        r = requests.get(url, timeout=120, stream=True)
-        r.raise_for_status()
-        arc = Path(tempfile.gettempdir()) / "engageflow_db_vps_restore.tar.gz"
-        with open(arc, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-        with tarfile.open(arc, "r:gz") as tf:
-            tf.extractall(data_dir)
-        main_db = data_dir / "engageflow.db"
-        if main_db.exists():
-            conn = sqlite3.connect(main_db, timeout=5.0)
-            try:
-                conn.execute("PRAGMA integrity_check").fetchone()
-            finally:
-                conn.close()
-        LOGGER.info("restore-db background completed: %s", main_db)
-    except Exception as e:
-        LOGGER.exception("restore-db background failed: %s", e)
-
-
-@app.post("/internal/restore-db")
-def internal_restore_db(request: Request, body: RestoreDbBody):
-    """Start restore in background and return 202. Requires X-JOINER-SECRET + ENGAGEFLOW_DEBUG=1. Poll /debug/dbinfo for result. Build marker: dbb59c2."""
-    _require_internal_restore_auth(request)
-    url = (body.url or "").strip()
-    if not url or not url.startswith(("http://", "https://")):
-        raise HTTPException(400, "url must be http(s)")
-    db_path = Path(DB_PATH)
-    data_dir = db_path.parent
-    t = threading.Thread(target=_do_restore_sync, args=(url, data_dir), daemon=True)
-    t.start()
-    return JSONResponse(
-        status_code=202,
-        content={"status": "accepted", "message": "Restore started in background. Poll /debug/dbinfo for profiles_count."},
-    )
-
-
-@app.get("/health")
-async def health(request: Request):
-    """Health check: status=ok, running=engine.is_running."""
-    engine = getattr(request.app.state, "automation_engine", None)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            if 200 <= resp.status < 300:
+                result["ok"] = True
+                result["status"] = "ok"
+                result["cookie_json"] = cookie_json
+                result["message"] = "Auth valid"
+                return result
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403):
+            result["status"] = "api_error"
+            result["message"] = f"Skool API HTTP {e.code}"
+            return result
+        got_401_403 = True
+    except Exception as exc:
+        err = str(exc).lower()
+        if "401" in err or "403" in err:
+            got_401_403 = True
+        else:
+            result["status"] = "network_error"
+            result["message"] = str(exc)[:200]
+            return result
+    if not got_401_403:
+        return result
+    LOGGER.info("[AUTH] profile=%s Skool API 401/403, attempting refresh", profile_id)
+    result["refresh_attempted"] = True
+    engine = _AUTOMATION_ENGINE_REF
     if not engine:
-        return {"status": "ok", "running": False}
-    try:
-        status = await engine.get_status()
-        running = bool((status or {}).get("isRunning"))
-    except Exception:
-        running = False
-    return {"status": "ok", "running": running}
-
-
-def _get_db_status_payload() -> Dict[str, Any]:
-    """Robust DB diagnostics (never raises)."""
-    from datetime import datetime, timezone
-    db_path = str(DB_PATH)
-    db_exists = DB_PATH.exists()
-    db_size = DB_PATH.stat().st_size if db_exists else 0
-    writable = False
-    last_activity_timestamp: Optional[str] = None
-    user_version: Optional[int] = None
-    try:
-        with get_db() as db:
-            # writable: try to acquire write lock
-            db.execute("BEGIN IMMEDIATE")
-            db.execute("COMMIT")
-            writable = True
-            row = db.execute(
-                "SELECT timestamp FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
-            ).fetchone()
-            last_activity_timestamp = row["timestamp"] if row else None
-            uv = db.execute("PRAGMA user_version").fetchone()
-            user_version = uv[0] if uv is not None else None
-    except Exception as e:
-        pass  # writable, last_activity_timestamp stay default
-    return {
-        "db_path": db_path,
-        "db_file_exists": db_exists,
-        "db_size_bytes": db_size,
-        "writable": writable,
-        "last_activity_timestamp": last_activity_timestamp,
-        "user_version": user_version,
-        "now_utc": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _api_root_response():
-    return {
-        "service": "EngageFlow API",
-        "docs": "Use /api/profiles, /api/db-status, /api/automation/status, etc.",
-    }
-
-
-@app.get("/api")
-@app.get("/api/")
-def api_root():
-    """Root API info so GET /api and GET /api/ do not return 404."""
-    return _api_root_response()
-
-
-@app.get("/")
-def root():
-    """Backend root (e.g. when request path was /api/ and middleware stripped to /)."""
-    return _api_root_response()
-
-
-@app.get("/api/db-status")
-async def api_db_status(request: Request):
-    """DB diagnostics. Always available. Never 500."""
-    try:
-        return _get_db_status_payload()
-    except Exception:
-        return {
-            "db_path": str(DB_PATH),
-            "db_file_exists": DB_PATH.exists(),
-            "db_size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
-            "writable": False,
-            "last_activity_timestamp": None,
-            "user_version": None,
-            "now_utc": datetime.now(timezone.utc).isoformat(),
-            "error": "partial",
-        }
-
-
-@app.get("/api/diagnostics")
-async def api_diagnostics(request: Request):
-    """DEV diagnostics: system health, DB, engine state, last activity, recent errors, env flags. Never 500."""
-    errors: List[str] = []
-    result: Dict[str, Any] = {
-        "git_sha": _BUILD_INFO["git_sha"],
-        "build_time_utc": _BUILD_INFO["build_time_utc"],
-        "service_name": _BUILD_INFO["service_name"],
-        "db_master_enabled": True,
-        "system_health": {"status": "unknown", "running": False},
-        "database_status": None,
-        "automation_engine_state": {"running": False, "current_task": None, "next_wakeup": None},
-        "last_activity_timestamp": None,
-        "recent_errors": [],
-        "environment_flags": {
-            "ENGAGEFLOW_AUTOMATION_ENABLED": ENGAGEFLOW_AUTOMATION_ENABLED,
-            "ENGAGEFLOW_DEBUG": ENGAGEFLOW_DEBUG,
-            "db_path": str(DB_PATH),
-            "db_master_enabled": True,
-        },
-    }
-    try:
-        engine = getattr(request.app.state, "automation_engine", None)
-        if engine:
+        result["status"] = "login_required"
+        result["message"] = "Cookies invalid/expired; refresh unavailable"
+        return result
+    refresh = engine.run_profile_login_refresh_sync(profile_id)
+    LOGGER.info("[AUTH] profile=%s refresh_attempted=true refresh_result=%s", profile_id, refresh.get("status", "failed"))
+    result["refresh_result"] = refresh.get("status", "failed")
+    if refresh.get("success") and refresh.get("cookie_json"):
+        new_cookies = _cookies_from_json(refresh["cookie_json"])
+        if new_cookies:
+            req2 = urllib.request.Request(SKOOL_AUTH_CHECK_URL, headers={**headers, "Cookie": new_cookies}, method="GET")
             try:
-                status = await engine.get_status()
-                running = bool((status or {}).get("isRunning"))
-                result["system_health"] = {"status": "ok", "running": running}
-                result["automation_engine_state"] = {
-                    "running": running,
-                    "current_task": (status or {}).get("runState"),
-                    "next_wakeup": (status or {}).get("countdownSeconds"),
-                }
-            except Exception as e:
-                errors.append(f"engine.get_status: {e!s}")
-                result["system_health"] = {"status": "error", "running": False}
-        else:
-            result["system_health"] = {"status": "ok", "running": False}
-    except Exception as e:
-        errors.append(f"engine_access: {e!s}")
-    try:
-        with get_db() as db:
-            settings = _load_or_create_automation_settings(db)
-            result["db_master_enabled"] = bool(settings.masterEnabled)
-            result["environment_flags"]["db_master_enabled"] = bool(settings.masterEnabled)
-    except Exception:
-        result["db_master_enabled"] = True
-        result["environment_flags"]["db_master_enabled"] = True
-    try:
-        result["database_status"] = _get_db_status_payload()
-        result["last_activity_timestamp"] = result["database_status"].get("last_activity_timestamp")
-    except Exception as e:
-        errors.append(f"db_status: {e!s}")
-        result["database_status"] = {"error": str(e)}
-    try:
-        db_path = str(DB_PATH)
-        db_file_modified_time = DB_PATH.stat().st_mtime if DB_PATH.exists() else 0
-        engine = getattr(request.app.state, "automation_engine", None)
-        now_server_utc = datetime.now(timezone.utc).isoformat()
-        next_action_id = None
-        next_run_at_absolute = None
-        eta_seconds = 0
-        scheduler_source_of_truth = "none"
-        engine_state = "unknown"
-        if engine:
-            try:
-                status = await engine.get_status()
-                engine_state = str((status or {}).get("runState", "unknown"))
-                next_run_at_absolute = (status or {}).get("nextScheduledFor")
-                eta_seconds = int((status or {}).get("countdownSeconds", 0) or 0)
-                if next_run_at_absolute:
-                    scheduler_source_of_truth = "queue"
-                elif engine_state in ("running", "waiting_schedule"):
-                    scheduler_source_of_truth = "scheduler_loop"
-                now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-                with get_db() as db:
-                    row = db.execute(
-                        "SELECT id, scheduledFor FROM queue_items WHERE julianday(scheduledFor) > julianday(?) ORDER BY julianday(scheduledFor) ASC, id ASC LIMIT 1",
-                        (now_iso,),
-                    ).fetchone()
-                    if row:
-                        next_action_id = row.get("id")
-                        if not next_run_at_absolute:
-                            next_run_at_absolute = row.get("scheduledFor")
-            except Exception as e:
-                errors.append(f"scheduler_truth: {e!s}")
-        result["scheduler_truth_packet"] = {
-            "now_server_utc": now_server_utc,
-            "next_action_id": next_action_id,
-            "next_run_at_absolute": next_run_at_absolute,
-            "eta_seconds": eta_seconds,
-            "scheduler_source_of_truth": scheduler_source_of_truth,
-            "db_path": db_path,
-            "db_file_modified_time": db_file_modified_time,
-            "engine_state": engine_state,
-            "last_activity_timestamp": result.get("last_activity_timestamp"),
-        }
-    except Exception as e:
-        errors.append(f"scheduler_truth_packet: {e!s}")
-        result["scheduler_truth_packet"] = {"error": str(e)}
-    try:
-        mem_errors = list(_RECENT_ERRORS)
-        log_path = LOG_DIR / "engageflow.log"
-        if log_path.exists():
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-            err_lines = [l.strip() for l in all_lines[-50:] if l and ("ERROR" in l or "Exception" in l or "Traceback" in l)]
-            result["recent_errors"] = mem_errors[-5:] + err_lines[-10:]
-        else:
-            result["recent_errors"] = mem_errors[-10:]
-    except Exception as e:
-        errors.append(f"log_read: {e!s}")
-    if errors:
-        result["errors"] = errors
+                with urllib.request.urlopen(req2, timeout=12) as resp2:
+                    if 200 <= resp2.status < 300:
+                        result["ok"] = True
+                        result["status"] = "ok"
+                        result["cookie_json"] = refresh["cookie_json"]
+                        result["message"] = "Auth refreshed"
+                        return result
+            except Exception:
+                pass
+    if refresh.get("status") == "captcha":
+        result["status"] = "captcha"
+        result["message"] = refresh.get("message", "Captcha required")
+        return result
+    if refresh.get("status") == "network_error" and "blocked" in (refresh.get("message") or "").lower():
+        result["status"] = "blocked"
+        result["message"] = refresh.get("message", "Account blocked")
+        return result
+    result["status"] = "login_required"
+    result["message"] = refresh.get("message", "Login required") or "Cookies invalid/expired"
     return result
 
-
-@app.get("/debug/runtime")
-async def debug_runtime(request: Request):
-    """DEV-only: runtime diagnostics. Requires ENGAGEFLOW_DEBUG=1. Never 500."""
-    if not ENGAGEFLOW_DEBUG:
-        raise HTTPException(404, "Not found")
-    db_path = str(DB_PATH)
-    db_exists = DB_PATH.exists()
-    db_size = DB_PATH.stat().st_size if db_exists else 0
-    engine_running = False
-    try:
-        engine = getattr(request.app.state, "automation_engine", None)
-        if engine:
-            status = await engine.get_status()
-            engine_running = bool((status or {}).get("isRunning"))
-    except Exception:
-        pass
-    newest_activity_timestamp = None
-    newest_queue_scheduledFor = None
-    try:
-        with get_db() as db:
-            newest_activity = db.execute(
-                "SELECT timestamp, profile, action FROM activity_feed ORDER BY timestamp DESC, rowid DESC LIMIT 1"
-            ).fetchone()
-            newest_queue = db.execute(
-                "SELECT scheduledFor, profile, community FROM queue_items ORDER BY scheduledFor ASC LIMIT 1"
-            ).fetchone()
-            newest_activity_timestamp = newest_activity["timestamp"] if newest_activity else None
-            newest_queue_scheduledFor = newest_queue["scheduledFor"] if newest_queue else None
-    except Exception:
-        pass
-    from datetime import datetime, timezone
-    return {
-        "db_path": db_path,
-        "db_file_exists": db_exists,
-        "db_size": db_size,
-        "engine_running": engine_running,
-        "now_utc": datetime.now(timezone.utc).isoformat(),
-        "newest_activity_timestamp": newest_activity_timestamp,
-        "newest_queue_scheduledFor": newest_queue_scheduledFor,
-    }
-
-
-@app.get("/debug/version")
-def debug_version():
-    """ENGAGEFLOW_DEBUG=1: returns git_sha, branch, build_time for deployment verification."""
-    if not ENGAGEFLOW_DEBUG:
-        raise HTTPException(404, "Not found")
-    return JSONResponse({
-        "git_sha": _BUILD_INFO["git_sha"],
-        "branch": os.environ.get("RAILWAY_GIT_BRANCH", "unknown"),
-        "build_time": _BUILD_INFO["build_time_utc"],
-    })
-
-
-@app.get("/debug/dbinfo")
-def debug_dbinfo():
-    """Railway-only: DB path, size, profiles counts. Requires ENGAGEFLOW_DEBUG=1. No cookie contents."""
-    if not ENGAGEFLOW_DEBUG:
-        raise HTTPException(404, "Not found")
-    try:
-        path = DB_PATH
-        size = path.stat().st_size if path.exists() else 0
-        profiles_count = 0
-        profiles_with_cookie_json = 0
-        if path.exists() and size > 0:
-            with sqlite3.connect(path, timeout=5.0) as conn:
-                profiles_count = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
-                profiles_with_cookie_json = conn.execute(
-                    "SELECT COUNT(*) FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
-                ).fetchone()[0]
-        return JSONResponse({
-            "db_path": str(path),
-            "file_size_bytes": size,
-            "profiles_count": profiles_count,
-            "profiles_with_cookie_json": profiles_with_cookie_json,
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/debug/scheduler")
-async def debug_scheduler(request: Request):
-    """DEV: scheduler state. Safe fallback (no get_debug_snapshot)."""
-    engine = getattr(request.app.state, "automation_engine", None)
-    if not engine:
-        return {"success": True, "running": False, "paused": False}
-    try:
-        status = await engine.get_status()
-        return {
-            "success": True,
-            "running": bool((status or {}).get("isRunning")),
-            "paused": bool((status or {}).get("isPaused")),
-        }
-    except Exception:
-        return {"success": True, "running": False, "paused": False}
-
-
-@app.get("/debug/logs")
-async def debug_logs(request: Request):
-    """DEV-only: last 100 log lines. Requires ENGAGEFLOW_DEBUG=1."""
-    if not ENGAGEFLOW_DEBUG:
-        raise HTTPException(404, "Not found")
-    limit = 100
-    log_path = LOG_DIR / "engageflow.log"
-    lines: List[str] = []
-    try:
-        if log_path.exists():
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-            lines = all_lines[-limit:] if len(all_lines) > limit else all_lines
-    except Exception as e:
-        lines = [f"[error reading log: {e!s}]\n"]
-    return {"success": True, "lines": lines, "count": len(lines)}
 
 
 def _normalize_log_message(message: str, max_len: int = 1000) -> str:
@@ -1080,59 +612,9 @@ def _insert_backend_log(
         _db_commit_with_retry(db)
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower():
-            with _LOG_BUFFER_LOCK:
-                _LOG_BUFFER.append({
-                    "profile": profile,
-                    "status": status,
-                    "module": module_value,
-                    "action": action_value,
-                    "message": normalized_message,
-                    "ts": now_display_time(),
-                })
-            LOGGER.warning(
-                "Buffered log write due to sqlite lock: profile=%s status=%s (buffer_size=%d)",
-                profile, status, len(_LOG_BUFFER),
-            )
+            LOGGER.warning("Skipped log write due to sqlite lock: profile=%s status=%s", profile, status)
             return
         raise
-
-
-def _flush_log_buffer(db: sqlite3.Connection) -> None:
-    """Retry buffered log writes; call after sync cycle when DB lock is released."""
-    with _LOG_BUFFER_LOCK:
-        pending = list(_LOG_BUFFER)
-        _LOG_BUFFER.clear()
-
-    requeue: List[Dict[str, Any]] = []
-    for entry in pending:
-        try:
-            ts = entry.get("ts") or now_display_time()
-            try:
-                _db_execute_with_retry(
-                    db,
-                    "INSERT INTO logs (id, timestamp, profile, status, module, action, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["module"], entry["action"], entry["message"], None),
-                )
-            except sqlite3.OperationalError as col_exc:
-                if "no column named module" not in str(col_exc).lower() and "no column named action" not in str(col_exc).lower():
-                    raise
-                _db_execute_with_retry(
-                    db,
-                    "INSERT INTO logs (id, timestamp, profile, status, message, fallbackLevelUsed) VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), ts, entry["profile"], entry["status"], entry["message"], None),
-                )
-            _db_commit_with_retry(db)
-        except sqlite3.OperationalError as exc:
-            if "locked" in str(exc).lower():
-                requeue.append(entry)
-            else:
-                raise
-        except Exception:
-            requeue.append(entry)
-
-    if requeue:
-        with _LOG_BUFFER_LOCK:
-            _LOG_BUFFER[:0] = requeue
 
 
 def _emit_dm_sync_log_once(
@@ -1516,7 +998,7 @@ def _extract_logged_in_profile_slug(page: Any) -> str:
               const endpoints = [
                 "https://api2.skool.com/self",
                 "https://api2.skool.com/self/member",
-                "https://api2.skool.com/self/profile",
+                "https://api2.skool.com/self",
                 "https://api2.skool.com/self/account",
               ];
               for (const url of endpoints) {
@@ -2241,6 +1723,7 @@ def _goto_skool_entry_page(page: Any, timeout_ms: int) -> tuple[bool, str]:
     if not PLAYWRIGHT_AVAILABLE:
         return False, "Playwright is not available"
     attempts = [
+        "https://www.skool.com/chat",
         "https://www.skool.com/",
     ]
     last_error = ""
@@ -2251,14 +1734,7 @@ def _goto_skool_entry_page(page: Any, timeout_ms: int) -> tuple[bool, str]:
                 page.wait_for_load_state("networkidle", timeout=9000)
             except Exception:
                 pass
-            try:
-                page.wait_for_selector(
-                    "div[class*='TopNav'], button[class*='ChatNotificationsIconButton'], a[href^='/@']",
-                    timeout=1800,
-                    state="visible",
-                )
-            except Exception:
-                pass
+            page.wait_for_timeout(1800)
             return True, url
         except Exception as exc:
             last_error = str(exc or "")
@@ -2564,112 +2040,154 @@ def _normalize_skool_community_url(path_or_url: str) -> str:
         return raw
 
 
-# Fetch communities for one profile by opening Skool switcher and resolving each community URL.
-def _fetch_skool_communities_for_profile(
-    profile_id: str,
-    profile_name: str,
-    proxy: Optional[str],
-) -> tuple[List[Dict[str, str]], Optional[str]]:
-    if not PLAYWRIGHT_AVAILABLE:
-        return [], "Playwright is not available on backend"
-    browser_dir = Path(__file__).parent / "skool_accounts" / profile_id / "browser"
-    if not browser_dir.exists():
-        return [], "Browser session directory is missing"
+def _is_community_active_member(page, url: str, timeout_ms: int = 8000) -> bool:
+    """Check if profile is active member (exclude pending/join-request). Matches community-join-manager logic."""
+    try:
+        page.set_default_timeout(timeout_ms)
+        resp = page.goto(url, timeout=timeout_ms)
+        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(1500)
+        if resp and (resp.status == 404 or resp.status >= 500):
+            return False
+        if "/login" in str(page.url or "").lower():
+            return False
+        txt = page.inner_text("body") or ""
+        txt_lower = txt.lower()
+        if re.search(r"invite\s+people|invite\s+others|invite\s+members|leave\s+group", txt_lower):
+            return True
+        if re.search(r"pending|you requested membership|cancel request", txt_lower):
+            return False
+        return False
+    except Exception:
+        return False
 
-    with _PLAYWRIGHT_SYNC_LOCK:
-        playwright = None
-        context = None
+
+SKOOL_GROUPS_URL = "https://api2.skool.com/self/groups?offset={offset}&limit=30&prefs=false&members=true"
+
+
+def _cookies_from_json(cookie_json) -> str:
+    if not cookie_json or not str(cookie_json).strip():
+        return ""
+    try:
+        c = json.loads(cookie_json) if isinstance(cookie_json, str) else cookie_json
+        arr = c if isinstance(c, list) else [c]
+        return "; ".join(str(x.get("name", "")) + "=" + str(x.get("value", "")) for x in arr if x.get("name"))
+    except Exception:
+        return ""
+
+
+def skool_api_get_groups(cookie_json, timeout=15, profile_id=None, _retry_count=0):
+    """Fetch /self/groups with cookie_json. On 401/403, one retry via ensure_profile_auth if profile_id given."""
+    import urllib.request
+    import urllib.error
+    cookies = _cookies_from_json(cookie_json)
+    if not cookies:
+        raise ValueError("No cookies / not logged in")
+    headers = {
+        "Cookie": cookies,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://www.skool.com",
+        "Referer": "https://www.skool.com/",
+    }
+    all_groups = []
+    offset = 0
+    for _ in range(50):
+        url = SKOOL_GROUPS_URL.format(offset=offset)
+        req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            playwright = _start_playwright_safe()
-            launch_kwargs: Dict[str, Any] = {
-                "user_data_dir": str(browser_dir),
-                "headless": True,
-                "viewport": {"width": 1600, "height": 1100},
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            }
-            proxy_cfg = _parse_proxy_to_playwright(proxy)
-            if proxy_cfg:
-                launch_kwargs["proxy"] = proxy_cfg
-            context = playwright.chromium.launch_persistent_context(**launch_kwargs)
-            page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(12000)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status in (401, 403):
+                    raise ValueError("cookies invalid/expired")
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and profile_id and _retry_count == 0:
+                auth = ensure_profile_auth(profile_id)
+                LOGGER.info("[FETCH] auth_check_ok=%s refresh_attempted=%s refresh_result=%s", auth.get("ok"), auth.get("refresh_attempted"), auth.get("refresh_result"))
+                if auth.get("ok") and auth.get("cookie_json"):
+                    return skool_api_get_groups(auth["cookie_json"], timeout, profile_id, _retry_count=1)
+            raise ValueError("cookies invalid/expired" if e.code in (401, 403) else f"API HTTP {e.code}")
+        except Exception as e:
+            err = str(e).lower()
+            if ("401" in err or "403" in err) and profile_id and _retry_count == 0:
+                auth = ensure_profile_auth(profile_id)
+                LOGGER.info("[FETCH] auth_check_ok=%s refresh_attempted=%s refresh_result=%s", auth.get("ok"), auth.get("refresh_attempted"), auth.get("refresh_result"))
+                if auth.get("ok") and auth.get("cookie_json"):
+                    return skool_api_get_groups(auth["cookie_json"], timeout, profile_id, _retry_count=1)
+            if "401" in err or "403" in err:
+                raise ValueError("cookies invalid/expired")
+            raise
+        groups = data.get("groups") or data.get("data") or (data if isinstance(data, list) else [])
+        all_groups.extend(groups)
+        if not data.get("has_more", False):
+            break
+        offset += 30
+    return all_groups
 
-            nav_ok, nav_info = _goto_skool_entry_page(page, SKOOL_CHAT_NAV_TIMEOUT_MS)
-            if not nav_ok:
-                return [], f"Skool navigation failed: {nav_info}"
-            if "/login" in str(page.url or "").lower():
-                return [], "Profile is not logged in to Skool"
 
-            if not _open_community_switcher_dropdown(page):
-                return [], "Could not open community switcher dropdown"
+def _membership_status(group):
+    try:
+        meta = group.get("metadata")
+        if isinstance(meta, str):
+            meta = json.loads(meta) if meta.strip() else {}
+        meta = meta or {}
+        member = meta.get("member")
+        if isinstance(member, str):
+            member = json.loads(member) if member.strip() else {}
+        member = member or {}
+        role = (member.get("role") or "").strip().lower()
+        if role == "pending":
+            return "pending"
+        if role == "member" or (role and role != "pending"):
+            return "joined"
+        return "unknown"
+    except Exception:
+        return "unknown"
 
-            items = _extract_community_switcher_items(page)
-            if not items:
-                return [], "No community entries found in switcher"
-
-            discovered: Dict[str, Dict[str, str]] = {}
-            attempted = 0
-            pending_names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
-            for item in items:
-                name = str(item.get("name") or "").strip()
-                href = _normalize_skool_community_url(str(item.get("href") or "").strip())
-                if not name:
-                    continue
-                if href and "/signup" not in href and "/chat" not in href:
-                    discovered[href] = {"name": name, "url": href}
-
-            # Resolve entries that have no direct href by clicking each community row.
-            unresolved = [name for name in pending_names if name and not any(v.get("name") == name for v in discovered.values())]
-            for community_name in unresolved:
-                if not _open_community_switcher_dropdown(page):
-                    continue
-                attempted += 1
-                before_url = str(page.url or "")
-                if not _click_community_switcher_item_by_name(page, community_name):
-                    continue
-                # Wait for SPA route/navigation update after switcher click.
-                deadline = time.time() + 8.0
-                while time.time() < deadline:
-                    try:
-                        page.wait_for_timeout(250)
-                    except Exception:
-                        break
-                    current_url = str(page.url or "").strip()
-                    if current_url and current_url != before_url:
-                        normalized = _normalize_skool_community_url(current_url)
-                        if normalized and "/signup" not in normalized and "/chat" not in normalized:
-                            discovered[normalized] = {"name": community_name, "url": normalized}
-                        break
-
-            discovered_list = list(discovered.values())
-            if not discovered_list:
-                if items:
-                    return [], (
-                        f"Community switcher opened, entries detected={len(items)}, "
-                        f"but no community URLs were resolved (attempted_clicks={attempted})"
-                    )
-                return [], "No community entries found in switcher"
-            return discovered_list, None
-        except Exception as exc:
-            return [], f"Community fetch failed: {str(exc)[:220] or 'unknown error'}"
-        finally:
+# Fetch communities (API-driven) and resolving each community URL.
+def _fetch_skool_communities_for_profile(profile_id, profile_name, proxy, cookie_json=None):
+    auth = ensure_profile_auth(profile_id)
+    if not auth.get("ok"):
+        status = auth.get("status", "login_required")
+        msg = auth.get("message", "Login required")
+        stats = {"auth_status": status, "refresh_attempted": auth.get("refresh_attempted"), "refresh_result": auth.get("refresh_result")}
+        return [], msg, stats
+    cookie_json = auth.get("cookie_json") or cookie_json
+    if not cookie_json or not str(cookie_json).strip():
+        return [], "No cookies / not logged in", None
+    try:
+        groups = skool_api_get_groups(cookie_json, profile_id=profile_id)
+    except ValueError as e:
+        return [], str(e), None
+    except Exception as e:
+        return [], f"API fetch failed: {str(e)[:180]}", None
+    total = len(groups)
+    joined_count = pending_count = unknown_count = 0
+    discovered = []
+    for g in groups:
+        status = _membership_status(g)
+        if status == "pending":
+            pending_count += 1
+            continue
+        if status == "unknown":
+            unknown_count += 1
+            continue
+        joined_count += 1
+        slug = str(g.get("slug") or g.get("groupSlug") or g.get("name") or "").strip()
+        if not slug:
+            continue
+        meta = g.get("metadata") or {}
+        if isinstance(meta, str):
             try:
-                if context:
-                    context.close()
+                meta = json.loads(meta) if meta.strip() else {}
             except Exception:
-                pass
-            try:
-                if playwright:
-                    playwright.stop()
-            except Exception:
-                pass
+                meta = {}
+        meta = meta or {}
+        name = str(meta.get("display_name") or g.get("name") or g.get("title") or slug or "").strip()
+        discovered.append({"name": name, "url": f"https://www.skool.com/{slug}"})
+    LOGGER.info(f"[FETCH] profile={profile_name} total={total} joined={joined_count} pending_excluded={pending_count} unknown_excluded={unknown_count}")
+    return discovered, None, {"total": total, "joined": joined_count, "pending_excluded": pending_count, "unknown_excluded": unknown_count}
 
-
-# Upsert discovered communities for one profile and preserve existing limits/counters.
 def _upsert_profile_communities_from_sync(
     db: sqlite3.Connection,
     profile_id: str,
@@ -3632,13 +3150,16 @@ def _fetch_live_skool_chat_cards(
     expected_identities: Optional[List[str]] = None,
     known_profile_slugs: Optional[Set[str]] = None,
     cached_cards_by_chat: Optional[Dict[str, Dict[str, Any]]] = None,
+    cookie_json: Optional[str] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
     if not PLAYWRIGHT_AVAILABLE:
         return [], "Playwright is not available on backend"
 
     browser_dir = Path(__file__).parent / "skool_accounts" / profile_id / "browser"
+
     if not browser_dir.exists():
-        return [], "Browser session directory is missing"
+        browser_dir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info(f"[FETCH] Created missing browser session directory for profile {profile_id}: {browser_dir}")
 
     last_error_message: Optional[str] = None
     nav_timeout_ms = SKOOL_CHAT_NAV_TIMEOUT_MS
@@ -3689,6 +3210,28 @@ def _fetch_live_skool_chat_cards(
                     page.set_default_timeout(12000)
                     page_ready = False
                     try:
+                        if cookie_json and cookie_json.strip():
+                            try:
+                                import json as _json
+                                arr = _json.loads(cookie_json) if isinstance(cookie_json, str) else cookie_json
+                                if isinstance(arr, dict):
+                                    arr = [arr]
+                                pw_cookies = []
+                                for x in (arr or []):
+                                    name = x.get("name") or x.get("key")
+                                    value = str(x.get("value", ""))
+                                    if name:
+                                        pw_cookies.append({
+                                            "name": str(name),
+                                            "value": value,
+                                            "domain": ".skool.com",
+                                            "path": "/",
+                                        })
+                                if pw_cookies:
+                                    page.goto("https://www.skool.com/", wait_until="domcontentloaded", timeout=15000)
+                                    context.add_cookies(pw_cookies)
+                            except Exception as _cookie_exc:
+                                LOGGER.warning("Inbox sync cookie inject failed for %s: %s", profile_id, _cookie_exc)
                         nav_ok, _ = _goto_skool_entry_page(page, nav_timeout_ms)
                         page_ready = bool(nav_ok)
                     except Exception:
@@ -4051,6 +3594,7 @@ def _fetch_live_skool_chat_cards_with_timeout(
     expected_identities: Optional[List[str]] = None,
     known_profile_slugs: Optional[Set[str]] = None,
     cached_cards_by_chat: Optional[Dict[str, Dict[str, Any]]] = None,
+    cookie_json: Optional[str] = None,
     timeout_seconds: int = SKOOL_CHAT_PROFILE_SYNC_TIMEOUT_SECONDS,
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
     try:
@@ -4062,6 +3606,7 @@ def _fetch_live_skool_chat_cards_with_timeout(
             expected_identities,
             known_profile_slugs,
             cached_cards_by_chat,
+            cookie_json,
         )
     except Exception as exc:
         return [], f"Live DM sync failed: {str(exc)[:220] or 'unknown error'}"
@@ -4483,7 +4028,7 @@ def _try_ai_auto_reply(
                         activity_profile,
                         origin_group,
                         activity_action,
-                        now_display_time(),
+                        datetime.now(timezone.utc).isoformat(),
                         activity_post_url,
                     ),
                 )
@@ -4519,12 +4064,7 @@ def _backfill_dm_activity_from_logs(db: sqlite3.Connection, *, limit: int = 5000
     for row in reversed(rows):
         scanned += 1
         profile = str(row["profile"] or "SYSTEM").strip() or "SYSTEM"
-        _pr = db.execute(
-            "SELECT name FROM profiles WHERE name = ? OR username = ? OR email = ? LIMIT 1",
-            (profile, profile, profile),
-        ).fetchone()
-        profile = str(_pr["name"]) if _pr and _pr.get("name") else profile
-        timestamp = str(row["timestamp"] or "").strip() or now_display_time()
+        timestamp = str(row["timestamp"] or "").strip() or datetime.now(timezone.utc).isoformat()
         message = str(row["message"] or "").strip()
 
         match = pattern_ai_auto_sent.search(message) or pattern_dm_sent.search(message)
@@ -5134,9 +4674,9 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
         return
     profile_rows = db.execute(
         """
-        SELECT id, name, proxy, email
+        SELECT id, name, proxy, email, cookie_json
         FROM profiles
-        WHERE lower(trim(coalesce(status, ''))) IN ('ready', 'running', 'active', 'idle', 'checking')
+        WHERE lower(trim(coalesce(status, ''))) IN ('ready', 'running')
         ORDER BY name
         """
     ).fetchall()
@@ -5203,8 +4743,6 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
             for idx, profile_row in enumerate(selected_profiles):
                 profile_id = str(profile_row["id"])
                 profile_name = str(profile_row["name"])
-                # Update profile_last_attempt immediately so rotation advances even on error.
-                profile_last_attempt[profile_id] = now_ts
                 cached_cards_by_chat: Dict[str, Dict[str, Any]] = {}
                 for cached_card in previous_live_cards:
                     if str(cached_card.get("profile_id") or "").strip() != profile_id:
@@ -5213,6 +4751,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
                     if not cached_chat_id:
                         continue
                     cached_cards_by_chat[cached_chat_id] = cached_card
+                profile_last_attempt[profile_id] = now_ts
                 profile_started_at = time.monotonic()
                 profile_cards: List[Dict[str, Any]] = []
                 sync_error: Optional[str] = None
@@ -5224,6 +4763,7 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
                         expected_identities=[str(profile_row["name"] or ""), str(profile_row["email"] or "")],
                         known_profile_slugs=known_profile_slugs,
                         cached_cards_by_chat=cached_cards_by_chat,
+                        cookie_json=(str(profile_row["cookie_json"] or "").strip() or None),
                     )
                     if not sync_error:
                         break
@@ -5402,10 +4942,6 @@ def _sync_skool_chats_to_inbox(db: sqlite3.Connection, force: bool = False) -> N
 
         db.commit()
     finally:
-        try:
-            _flush_log_buffer(db)
-        except Exception:
-            LOGGER.exception("_flush_log_buffer failed in finally block — ignoring")
         _SKOOL_CHAT_SYNC_LOCK.release()
 
 
@@ -5434,9 +4970,6 @@ def _load_or_create_automation_settings(db: sqlite3.Connection) -> AutomationSet
         if isinstance(stored_payload, dict):
             # Merge with defaults so new settings keys are added without wiping existing values.
             merged_payload = {**AUTOMATION_SETTINGS_DEFAULT.model_dump(), **stored_payload}
-            # Backward compat: if masterEnabled never persisted (legacy), treat as enabled.
-            if "masterEnabled" not in stored_payload:
-                merged_payload["masterEnabled"] = True
         else:
             merged_payload = AUTOMATION_SETTINGS_DEFAULT.model_dump()
         return AutomationSettingsModel(**merged_payload)
@@ -5447,29 +4980,9 @@ def _load_or_create_automation_settings(db: sqlite3.Connection) -> AutomationSet
         return AUTOMATION_SETTINGS_DEFAULT
 
 
-def _set_master_enabled_db(enabled: bool) -> None:
-    """Persist masterEnabled to automation_settings. Used by Stop (False) and Start (True)."""
-    with get_db() as db:
-        settings = _load_or_create_automation_settings(db)
-        payload = settings.model_dump()
-        payload["masterEnabled"] = enabled
-        db.execute(
-            "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (json.dumps(payload),),
-        )
-        db.commit()
-
-
 def ensure_tables() -> None:
     with get_db() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,username TEXT NOT NULL,password TEXT NOT NULL,email TEXT,proxy TEXT,avatar TEXT NOT NULL,status TEXT NOT NULL,dailyUsage INTEGER NOT NULL,groupsConnected INTEGER NOT NULL)""")
-        profile_cols = {str(row["name"] or "").strip() for row in db.execute("PRAGMA table_info(profiles)").fetchall()}
-        if "source" not in profile_cols:
-            db.execute("ALTER TABLE profiles ADD COLUMN source TEXT")
-        if "connected_at" not in profile_cols:
-            db.execute("ALTER TABLE profiles ADD COLUMN connected_at TEXT")
-        if "cookie_json" not in profile_cols:
-            db.execute("ALTER TABLE profiles ADD COLUMN cookie_json TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS communities (id TEXT PRIMARY KEY,profileId TEXT NOT NULL,name TEXT NOT NULL,url TEXT NOT NULL,dailyLimit INTEGER NOT NULL,maxPostAgeDays INTEGER NOT NULL DEFAULT 0,lastScanned TEXT NOT NULL,status TEXT NOT NULL,matchesToday INTEGER NOT NULL,actionsToday INTEGER NOT NULL,totalScannedPosts INTEGER NOT NULL,totalKeywordMatches INTEGER NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY,name TEXT NOT NULL,color TEXT NOT NULL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS keyword_rules (id TEXT PRIMARY KEY,keyword TEXT NOT NULL,persona TEXT NOT NULL,promptPreview TEXT NOT NULL,commentPrompt TEXT,dmPrompt TEXT,dmMaxReplies INTEGER,dmReplyDelay INTEGER,active INTEGER NOT NULL,assignedProfileIds TEXT NOT NULL)""")
@@ -5521,6 +5034,9 @@ def ensure_tables() -> None:
         if "maxPostAgeDays" not in community_columns:
             db.execute("ALTER TABLE communities ADD COLUMN maxPostAgeDays INTEGER NOT NULL DEFAULT 0")
         db.execute("UPDATE communities SET maxPostAgeDays = 0 WHERE maxPostAgeDays IS NULL OR maxPostAgeDays < 0")
+        pc = {str(r["name"]) for r in db.execute("PRAGMA table_info(profiles)").fetchall()}
+        if "cookie_json" not in pc:
+            db.execute("ALTER TABLE profiles ADD COLUMN cookie_json TEXT")
         profile_rows = db.execute("SELECT id, password FROM profiles").fetchall()
         for row in profile_rows:
             raw_password = str(row["password"] or "")
@@ -5531,6 +5047,7 @@ def ensure_tables() -> None:
                 (encrypt_secret(raw_password), row["id"]),
             )
         _load_proxy_cache_from_db(db)
+        ensure_joiner_tables(db)
         db.commit()
 
 
@@ -5679,6 +5196,10 @@ class CommunityFetchProfileResultModel(BaseModel):
     created: int
     updated: int
     skipped: int
+    total: Optional[int] = None
+    joined: Optional[int] = None
+    pendingExcluded: Optional[int] = None
+    unknownExcluded: Optional[int] = None
     error: Optional[str] = None
 
 
@@ -5690,6 +5211,10 @@ class CommunityFetchResponseModel(BaseModel):
     created: int
     updated: int
     skipped: int
+    totalFetched: Optional[int] = None
+    totalJoined: Optional[int] = None
+    totalPendingExcluded: Optional[int] = None
+    totalUnknownExcluded: Optional[int] = None
     results: List[CommunityFetchProfileResultModel]
 
 
@@ -6329,42 +5854,66 @@ def build_profile_model(row: sqlite3.Row) -> ProfileModel:
     )
 
 
-@app.post("/connect-skool")
-async def connect_skool(payload: ConnectSkoolModel, request: Request):
-    """Public endpoint for micro-workers to connect Skool accounts. Creates profile with source='micro', status='paused'."""
-    email = (payload.email or "").strip()
-    password_plain = (payload.password or "").strip()
-    if not email or not password_plain:
-        raise HTTPException(400, "email and password are required")
-    profile_id = str(uuid.uuid4())
-    password_encrypted = encrypt_secret(password_plain)
-    name = email.split("@")[0] or email
-    username = email
-    avatar = "".join([part[0] for part in name.split() if part]).upper()[:2] or "NA"
-    connected_at = datetime.now(timezone.utc).isoformat()
+@app.get("/debug/scheduler")
+async def debug_scheduler(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    snapshot = await engine.get_debug_snapshot()
+    return JSONResponse(snapshot)
+
+
+
+
+# ==================== BROWSER LOCK SYSTEM ====================
+def acquire_browser_lock(profile_id: str, locker: str = 'engageflow') -> bool:
+    """Acquire lock before launching browser."""
     with get_db() as db:
+        existing = db.execute(
+            'SELECT locked_by FROM browser_locks WHERE profile_id = ?',
+            (profile_id,)
+        ).fetchone()
+        if existing and existing['locked_by'] != locker:
+            raise Exception(f"Browser locked by {existing['locked_by']}")
+        now = datetime.now().isoformat()
         db.execute(
-            "INSERT INTO profiles (id, name, username, password, email, proxy, avatar, status, dailyUsage, groupsConnected, source, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (profile_id, name, username, password_encrypted, email, None, avatar, "paused", 0, 0, "micro", connected_at),
+            'INSERT INTO browser_locks (profile_id, locked_by, locked_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(profile_id) DO UPDATE SET locked_by = ?, locked_at = ?',
+            (profile_id, locker, now, locker, now)
         )
         db.commit()
-    engine = get_automation_engine(request)
+    return True
+
+def release_browser_lock(profile_id: str):
+    """Release lock after browser closes."""
+    with get_db() as db:
+        db.execute('DELETE FROM browser_locks WHERE profile_id = ?', (profile_id,))
+        db.commit()
+
+@app.get("/health")
+async def health_check(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    status = await engine.get_status()
+    if not status.get("isRunning"):
+        return JSONResponse({"status": "ok", "running": False})
+    hb_path = engine.heartbeat_file
     try:
-        result = await engine.check_login(profile_id)
-        if isinstance(result, dict) and result.get("success"):
-            return {"success": True, "profileId": profile_id, "message": "Connected"}
-        msg = str(result.get("message", "Login failed")) if isinstance(result, dict) else "Login failed"
-        with get_db() as db:
-            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
-            db.commit()
-        raise HTTPException(400, msg)
-    except HTTPException:
-        raise
-    except Exception as e:
-        with get_db() as db:
-            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
-            db.commit()
-        raise HTTPException(400, str(e))
+        data = json.loads(hb_path.read_text(encoding="utf-8"))
+        age = time.time() - float(data.get("ts", 0))
+        if age < 120:
+            return JSONResponse({"status": "ok", "running": True, "heartbeat_age_seconds": round(age, 1)})
+        return JSONResponse(
+            {"status": "error", "reason": f"heartbeat stale: age={round(age, 1)}s > 120s"},
+            status_code=500,
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            {"status": "error", "reason": "heartbeat file not found — scheduler may not have run yet"},
+            status_code=500,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"status": "error", "reason": str(exc)},
+            status_code=500,
+        )
 
 
 @app.get("/profiles", response_model=List[ProfileModel])
@@ -6445,6 +5994,44 @@ async def create_profile(payload: ProfileCreateModel, request: Request):
     return build_profile_model(row)
 
 
+@app.post("/connect-skool")
+async def connect_skool(payload: ConnectSkoolModel, request: Request):
+    """Public endpoint for micro-workers to connect Skool accounts. Creates profile with source='micro', status='paused'."""
+    email = (payload.email or "").strip()
+    password_plain = (payload.password or "").strip()
+    if not email or not password_plain:
+        raise HTTPException(400, "email and password are required")
+    profile_id = str(uuid.uuid4())
+    password_encrypted = encrypt_secret(password_plain)
+    name = email.split("@")[0] or email
+    username = email
+    avatar = "".join([part[0] for part in name.split() if part]).upper()[:2] or "NA"
+    connected_at = datetime.now(timezone.utc).isoformat()
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO profiles (id, name, username, password, email, proxy, avatar, status, dailyUsage, groupsConnected, source, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile_id, name, username, password_encrypted, email, None, avatar, "paused", 0, 0, "micro", connected_at),
+        )
+        db.commit()
+    engine = get_automation_engine(request)
+    try:
+        result = await engine.check_login(profile_id)
+        if isinstance(result, dict) and result.get("success"):
+            return {"success": True, "profileId": profile_id, "message": "Connected"}
+        msg = str(result.get("message", "Login failed")) if isinstance(result, dict) else "Login failed"
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, msg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        with get_db() as db:
+            db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            db.commit()
+        raise HTTPException(400, str(e))
+
+
 @app.put("/profiles/{profile_id}", response_model=ProfileModel)
 def update_profile(profile_id: str, payload: ProfileUpdateModel):
     updates = payload.model_dump(exclude_unset=True)
@@ -6494,6 +6081,7 @@ def reset_profile_counters(profile_id: str):
         )
         _db_commit_with_retry(db)
     return {"success": True}
+
 
 
 @app.delete("/profiles/{profile_id}")
@@ -6565,6 +6153,10 @@ def _set_community_fetch_state(**patch: Any) -> None:
 
 # Run community sync in background so UI can track stable progress across page reloads.
 def _run_communities_fetch_job() -> None:
+    total_fetched = 0
+    total_joined = 0
+    total_pending_excluded = 0
+    total_unknown_excluded = 0
     results: List[CommunityFetchProfileResultModel] = []
     total_discovered = 0
     total_created = 0
@@ -6574,7 +6166,7 @@ def _run_communities_fetch_job() -> None:
     try:
         with get_db() as db:
             profile_rows = db.execute(
-                "SELECT id, name, proxy FROM profiles ORDER BY name"
+                "SELECT id, name, proxy, cookie_json FROM profiles ORDER BY name"
             ).fetchall()
             _set_community_fetch_state(
                 profilesTotal=len(profile_rows),
@@ -6592,12 +6184,20 @@ def _run_communities_fetch_job() -> None:
                     currentProfileId=profile_id,
                     currentProfileName=profile_name,
                 )
-                discovered_items, error = _fetch_skool_communities_for_profile(
-                    profile_id=profile_id,
-                    profile_name=profile_name,
-                    proxy=proxy,
+                cookie_json = (profile["cookie_json"] or "").strip() if profile["cookie_json"] else None
+                discovered_items, error, stats = _fetch_skool_communities_for_profile(
+                    profile_id=profile_id, profile_name=profile_name, proxy=proxy, cookie_json=cookie_json
                 )
                 discovered_count = len(discovered_items)
+                st = stats or {}
+                prof_total = st.get("total") or 0
+                prof_joined = st.get("joined") or 0
+                prof_pending = st.get("pending_excluded") or 0
+                prof_unknown = st.get("unknown_excluded") or 0
+                total_fetched += prof_total
+                total_joined += prof_joined
+                total_pending_excluded += prof_pending
+                total_unknown_excluded += prof_unknown
                 created = 0
                 updated = 0
                 skipped = 0
@@ -6626,6 +6226,10 @@ def _run_communities_fetch_job() -> None:
                         created=created,
                         updated=updated,
                         skipped=skipped,
+                        total=prof_total if stats else None,
+                        joined=prof_joined if stats else None,
+                        pendingExcluded=prof_pending if stats else None,
+                        unknownExcluded=prof_unknown if stats else None,
                         error=error,
                     )
                 )
@@ -6652,6 +6256,10 @@ def _run_communities_fetch_job() -> None:
             created=total_created,
             updated=total_updated,
             skipped=total_skipped,
+            totalFetched=total_fetched,
+            totalJoined=total_joined,
+            totalPendingExcluded=total_pending_excluded,
+            totalUnknownExcluded=total_unknown_excluded,
             results=results,
         )
         _set_community_fetch_state(
@@ -6883,41 +6491,259 @@ def get_automation_settings():
 @app.put("/automation-settings", response_model=AutomationSettingsModel)
 @app.put("/automation/settings", response_model=AutomationSettingsModel)
 def update_automation_settings(payload: AutomationSettingsModel):
-    try:
-        with get_db() as db:
-            _load_or_create_automation_settings(db)
-            db.execute("DELETE FROM automation_settings WHERE key != 'default'")
-            db.execute(
-                "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (payload.model_dump_json(),),
-            )
-            db.commit()
-        return payload
-    except Exception as exc:
-        LOGGER.exception("Settings update failed")
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "error": "settings_update_failed",
-                "message": str(exc)[:200],
-            },
+    with get_db() as db:
+        _load_or_create_automation_settings(db)
+        db.execute("DELETE FROM automation_settings WHERE key != 'default'")
+        db.execute(
+            "INSERT INTO automation_settings (key, value) VALUES ('default', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (payload.model_dump_json(),),
         )
+        db.commit()
+    return payload
+
+
+
+@app.post("/communities/auto-register")
+def auto_register_community():
+    """Webhook from joiner: auto-register a newly joined community."""
+    data = request.json or {}
+    profile_id = data.get("profileId", "")
+    slug = data.get("slug", "")
+    name = data.get("name", slug)
+    url = data.get("url", f"https://www.skool.com/{slug}")
+
+    if not profile_id or not slug:
+        return {"error": "profileId and slug required"}, 400
+
+    with get_db() as db:
+        # Check profile exists
+        profile = db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not profile:
+            return {"error": "Profile not found"}, 404
+
+        # Check if community already exists for this profile
+        existing = db.execute(
+            "SELECT id FROM communities WHERE profileId = ? AND url LIKE ?",
+            (profile_id, f"%{slug}%")
+        ).fetchone()
+        if existing:
+            return {"message": "Community already registered", "id": existing["id"]}
+
+        # Create new community with defaults
+        import uuid
+        comm_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        db.execute(
+            """INSERT INTO communities (id, profileId, name, url, dailyLimit, maxPostAgeDays, lastScanned, status, matchesToday, actionsToday, totalScannedPosts, totalKeywordMatches)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (comm_id, profile_id, name, url, 3, 7, now, "active", 0, 0, 0, 0)
+        )
+        db.commit()
+
+    return {"success": True, "id": comm_id, "message": f"Auto-registered {name}"}
+
+@app.get("/queue/preview")
+def queue_preview(limit: int = 50, days: int = 2):
+    """Read-only projected schedule. No DB writes, no Playwright, no mutation."""
+    limit = max(1, min(200, limit))
+    days = max(1, min(7, days))
+    now = datetime.now()
+    end_boundary = now + timedelta(days=days)
+
+    with get_db() as db:
+        profiles = db.execute("SELECT * FROM profiles WHERE status IN ('ready','running','idle') ORDER BY name").fetchall()
+        communities_rows = db.execute("SELECT * FROM communities WHERE status = 'active' ORDER BY name").fetchall()
+        settings_row = db.execute("SELECT value FROM automation_settings WHERE key = 'default'").fetchone()
+        keyword_rules_rows = db.execute("SELECT id, keyword, assignedProfileIds FROM keyword_rules WHERE active = 1").fetchall()
+
+    # Build keywords_by_profile for forecast keyword assignment
+    _keywords_by_profile: Dict[str, List[tuple]] = {}
+    for kr in keyword_rules_rows:
+        assigned = str(kr["assignedProfileIds"] or "")
+        for pid_part in assigned.split(","):
+            pid_part = pid_part.strip()
+            if pid_part:
+                _keywords_by_profile.setdefault(pid_part, []).append((str(kr["id"]), str(kr["keyword"])))
+
+    if not profiles:
+        return []
+
+    profiles = [dict(row) for row in profiles]
+    settings = json.loads(settings_row["value"]) if settings_row else {}
+    global_daily_cap = max(1, int(settings.get("globalDailyCapPerAccount", 5)))
+    scan_interval_minutes = max(1, int(settings.get("scanIntervalMinutes", 5)))
+    step_seconds = scan_interval_minutes * 60
+
+    communities_by_profile: Dict[str, List[Dict[str, Any]]] = {}
+    for row in communities_rows:
+        pid = str(row["profileId"] or "")
+        communities_by_profile.setdefault(pid, []).append(dict(row))
+
+    # Load rotation pointers from run_state
+    rotation_pointers: Dict[str, int] = {}
+    run_state_path = Path(__file__).parent / "skool_run_state.json"
+    try:
+        with open(run_state_path, "r", encoding="utf-8") as f:
+            rs = json.load(f)
+        for p in rs.get("profiles", []):
+            pid = str(p.get("id") or "")
+            if pid:
+                rotation_pointers[pid] = int(p.get("_current_community_index", 0) or 0)
+    except Exception:
+        pass
+
+    # Build per-profile projection state
+    profile_states = []
+    for prof in profiles:
+        pid = str(prof["id"])
+        comms = communities_by_profile.get(pid, [])
+        if not comms:
+            continue
+        done_today = int(prof.get("dailyUsage", 0) or 0)
+        remaining_today = max(0, global_daily_cap - done_today)
+        comm_idx = rotation_pointers.get(pid, 0) % len(comms)
+        profile_states.append({
+            "id": pid,
+            "name": str(prof.get("name") or prof.get("email") or pid),
+            "communities": comms,
+            "comm_idx": comm_idx,
+            "remaining_today": remaining_today,
+            "daily_cap": global_daily_cap,
+            "kw_idx": 0,
+            "keywords": _keywords_by_profile.get(pid, []),
+        })
+
+    if not profile_states:
+        return []
+
+    # Generate interleaved projections round-robin across profiles
+    items = []
+    slot = 0
+    # Track per-day remaining (resets at midnight boundaries)
+    day_remaining: Dict[str, int] = {ps["id"]: ps["remaining_today"] for ps in profile_states}
+    day_comm_actions: Dict[str, Dict[str, int]] = {ps["id"]: {} for ps in profile_states}
+    current_day = now.date()
+
+    while len(items) < limit:
+        added_this_round = False
+        for ps in profile_states:
+            if len(items) >= limit:
+                break
+            pid = ps["id"]
+
+            # Compute projected time for this slot
+            projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
+            if projected_dt > end_boundary:
+                continue
+
+            # Reset daily counters at day boundary
+            proj_day = projected_dt.date()
+            if proj_day != current_day:
+                current_day = proj_day
+                for ps2 in profile_states:
+                    day_remaining[ps2["id"]] = ps2["daily_cap"]
+                    day_comm_actions[ps2["id"]] = {}
+
+            if day_remaining[pid] <= 0:
+                continue
+
+            # Find next eligible community using rotation pointer
+            comms = ps["communities"]
+            found_community = None
+            for _ in range(len(comms)):
+                c = comms[ps["comm_idx"] % len(comms)]
+                ps["comm_idx"] += 1
+                cid = str(c.get("id") or "")
+                c_limit = int(c.get("dailyLimit") or 0)
+                c_used = int(day_comm_actions.get(pid, {}).get(cid, 0) or 0)
+                if c_limit > 0 and c_used >= c_limit:
+                    continue
+                found_community = c
+                break
+
+            if not found_community:
+                continue
+
+            cid = str(found_community.get("id") or "")
+            day_comm_actions.setdefault(pid, {})[cid] = int(day_comm_actions.get(pid, {}).get(cid, 0) or 0) + 1
+            day_remaining[pid] -= 1
+
+            display_time = _format_queue_display_time(projected_dt)
+            local_tz = now.astimezone().tzinfo
+            scheduled_for_iso = projected_dt.replace(tzinfo=local_tz).isoformat(timespec="seconds") if local_tz else projected_dt.isoformat(timespec="seconds")
+
+            day_label = ""
+            delta_days = (projected_dt.date() - now.date()).days
+            if delta_days == 1:
+                day_label = "Tomorrow"
+            elif delta_days > 1:
+                day_label = projected_dt.strftime("%a %b %d")
+
+            # Pick keyword via round-robin
+            kw_name = ""
+            kw_id = ""
+            if ps.get("keywords"):
+                kw_entry = ps["keywords"][ps["kw_idx"] % len(ps["keywords"])]
+                kw_id = kw_entry[0]
+                kw_name = kw_entry[1]
+                ps["kw_idx"] += 1
+
+            items.append({
+                "id": f"preview-{len(items)}",
+                "profile": ps["name"],
+                "profileId": pid,
+                "community": str(found_community.get("name") or ""),
+                "communityId": cid,
+                "postId": "",
+                "keyword": kw_name,
+                "keywordId": kw_id,
+                "scheduledTime": display_time,
+                "scheduledFor": scheduled_for_iso,
+                "priorityScore": 0,
+                "countdown": max(0, int((projected_dt - now).total_seconds())),
+                "isProjected": True,
+                "dayLabel": day_label,
+                "actionLabel": f"Next eligible post in {found_community.get('name', 'community')}",
+            })
+            added_this_round = True
+
+        slot += 1
+        if not added_this_round:
+            # All profiles capped for current day - jump to next day boundary
+            projected_dt = now + timedelta(seconds=step_seconds * (slot + 1))
+            next_day_start = datetime.combine(projected_dt.date() + timedelta(days=1), datetime.min.time())
+            # Add 5 seconds past midnight (matches engine reset timing)
+            next_day_start = next_day_start.replace(second=5)
+            jump_seconds = (next_day_start - now).total_seconds()
+            if jump_seconds <= 0:
+                break
+            new_slot = int(jump_seconds / step_seconds) + 1
+            if new_slot <= slot:
+                break
+            slot = new_slot
+            # Reset daily counters
+            current_day = next_day_start.date()
+            for ps2 in profile_states:
+                day_remaining[ps2["id"]] = ps2["daily_cap"]
+                day_comm_actions[ps2["id"]] = {}
+            continue
+        max_slots = int((end_boundary - now).total_seconds() / step_seconds) + limit
+        if slot > max_slots:
+            # Safety valve: don't exceed the forecast window
+            break
+
+    return items
 
 
 @app.get("/queue", response_model=List[QueueItemModel])
-def read_queue(profile_id: Optional[str] = None, limit: int = 30):
+def read_queue(profile_id: Optional[str] = None):
     query = "SELECT * FROM queue_items"
     params: List[Any] = []
     if profile_id:
         query += " WHERE profileId = ?"
         params.append(profile_id)
-    safe_limit = max(10, min(200, int(limit or 30)))
     with get_db() as db:
-        rows = db.execute(
-            query + " ORDER BY julianday(scheduledFor) ASC, id ASC LIMIT ?",
-            (*params, safe_limit),
-        ).fetchall()
+        rows = db.execute(query + " ORDER BY julianday(scheduledFor) ASC, id ASC", params).fetchall()
     ordered_rows = [dict(row) for row in rows]
     # Dashboard readability: interleave queue by profile while preserving
     # per-profile scheduled order to reflect round-robin intent.
@@ -7069,73 +6895,17 @@ def clear_logs():
     return {"success": True, "deleted": deleted}
 
 
-def _normalize_activity_timestamp(ts: str) -> str:
-    """Normalize UTC timestamps for consistent API output: ensure Z suffix for unambiguous parsing."""
-    if not ts:
-        return ts
-    s = str(ts).strip()
-    if s.endswith("+00:00"):
-        return s[:-6] + "Z"
-    if s.endswith("+0000"):
-        return s[:-5] + "Z"
-    if s.endswith("Z") or (len(s) >= 6 and s[-6] in "+-" and s[-3] == ":"):
-        return s
-    # ISO-like datetime without timezone: treat as UTC, append Z for frontend parseISO
-    if s and len(s) >= 19 and s[4] == "-" and s[10] in "T " and s[13] == ":":
-        return s.rstrip() + "Z"
-    return s
-
-
-@app.get("/api/logs")
-def read_automation_lifecycle_logs(request: Request, limit: int = 50):
-    """Return last N automation lifecycle trace entries for diagnosing executor stall."""
-    engine = getattr(request.app.state, "automation_engine", None)
-    if not engine or not hasattr(engine, "_lifecycle_trace"):
-        return {"success": True, "entries": [], "count": 0}
-    trace = list(engine._lifecycle_trace)
-    safe_limit = max(10, min(100, int(limit or 50)))
-    entries = trace[-safe_limit:]
-    return {
-        "success": True,
-        "entries": [
-            dict(
-                timestamp=e.get("timestamp", ""),
-                task_id=e.get("task_id", ""),
-                profile_id=e.get("profile_id", ""),
-                action_type=e.get("action_type", ""),
-                state=e.get("state", ""),
-                event=e.get("event", ""),
-                row_count=e.get("row_count"),
-                count=e.get("count"),
-                from_queue=e.get("from_queue"),
-                error=e.get("error"),
-            )
-            for e in entries
-        ],
-        "count": len(entries),
-    }
-
-
 @app.get("/activity", response_model=List[ActivityEntryModel])
-def read_activity(profile: Optional[str] = None, limit: int = 100):
-    # Show timeline only for currently active profiles. LIMIT 100 enforced.
+def read_activity(profile: Optional[str] = None):
+    # Show timeline only for currently active profiles.
     query = "SELECT * FROM activity_feed WHERE profile IN (SELECT name FROM profiles)"
     params: List[Any] = []
     if profile:
         query += " AND profile = ?"
         params.append(profile)
-    safe_limit = max(10, min(500, int(limit or 100)))
     with get_db() as db:
-        rows = db.execute(
-            query + " ORDER BY timestamp DESC, rowid DESC LIMIT ?",
-            (*params, safe_limit),
-        ).fetchall()
-    result = []
-    for row in rows:
-        d = dict(row)
-        d["timestamp"] = _normalize_activity_timestamp(d.get("timestamp") or "")
-        result.append(ActivityEntryModel(**d))
-    return result
+        rows = db.execute(query + " ORDER BY rowid DESC", params).fetchall()
+    return [ActivityEntryModel(**dict(row)) for row in rows]
 
 
 @app.post("/maintenance/backfill-dm-activity")
@@ -7181,10 +6951,6 @@ def read_conversations(profile_id: Optional[str] = None, sync: bool = False):
             _sync_skool_chats_to_inbox(db, force=True)
         messages = build_message_map(db)
         rows = db.execute(query, params).fetchall()
-        # When empty, trigger sync and re-query so inbox populates
-        if not rows and not sync:
-            _sync_skool_chats_to_inbox(db, force=True)
-            rows = db.execute(query, params).fetchall()
 
     def _conversation_rank(row: sqlite3.Row) -> Tuple[float, int]:
         raw_ts = str(row["lastMessageTime"] or "").strip()
@@ -7275,7 +7041,7 @@ def conversation_ai_suggest(conversation_id: str, payload: ConversationAISuggest
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationModel)
 def add_message(conversation_id: str, payload: MessageCreateModel):
     message_id = str(uuid.uuid4())
-    ts = payload.timestamp or now_display_time()
+    ts = payload.timestamp or datetime.now(timezone.utc).isoformat()
     with get_db() as db:
         row = db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
         if not row:
@@ -7344,16 +7110,14 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
             )
             try:
-                # Use canonical profiles.name for activity_feed.profile.
-                act_profile = str(profile_row["name"] or row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        act_profile,
+                        str(row["profileName"] or "SYSTEM"),
                         str(row["originGroup"] or "Skool Inbox"),
                         f"DM sent to {str(row['contactName'] or '').strip() or 'contact'}",
-                        now_display_time(),
+                        datetime.now(timezone.utc).isoformat(),
                         f"https://www.skool.com/chat?ch={chat_id}",
                     ),
                 )
@@ -7375,15 +7139,11 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
                 comment_attr = parse_json_field(raw_comment_attr, {})
                 post_url = str(comment_attr.get("postUrl") or "").strip() or "https://www.skool.com/"
                 contact_name = str(row["contactName"] or "").strip() or "contact"
-                # Use canonical profiles.name for activity_feed.profile.
-                pid = str(row.get("profileId") or "").strip()
-                pr_row = db.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone() if pid else None
-                act_profile = str(pr_row["name"]) if pr_row and pr_row.get("name") else str(row["profileName"] or "SYSTEM")
                 db.execute(
                     "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
-                        act_profile,
+                        str(row["profileName"] or "SYSTEM"),
                         str(row["originGroup"] or "Inbox"),
                         f"DM sent to {contact_name}",
                         ts,
@@ -7396,131 +7156,42 @@ def add_message(conversation_id: str, payload: MessageCreateModel):
     return build_conversation_model(row, messages)
 
 @app.post("/automation/start")
-@app.post("/api/automation/start")
-async def automation_start(request: Request, payload: Optional[AutomationStartRequest] = Body(default=None)):
-    p = payload or AutomationStartRequest()
-    _set_master_enabled_db(True)
+async def automation_start(payload: AutomationStartRequest, request: Request):
     engine = get_automation_engine(request)
     try:
-        return _with_request_id(request, await engine.start(p.profiles, p.globalSettings))
+        return await engine.start(payload.profiles, payload.globalSettings)
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
-    except Exception as exc:
-        LOGGER.exception("Automation start failed: %s", exc)
-        raise HTTPException(503, f"Start failed: {exc!s}")
-
-
-def _idempotent_stopped_response() -> Dict[str, Any]:
-    """Return standard stopped status when engine not ready or already stopped."""
-    return {
-        "ok": True,
-        "success": True,
-        "isRunning": False,
-        "isPaused": False,
-        "state": "idle",
-        "runState": "idle",
-        "countdownSeconds": 0,
-        "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
-        "currentProfileIndex": 0,
-        "profiles": [],
-        "stats": {},
-        "activity": [],
-    }
-
-
-def _stop_error_response(error_msg: str) -> Dict[str, Any]:
-    """Return 200-safe stopped status with ok=false when stop fails."""
-    return {
-        "ok": False,
-        "success": True,
-        "isRunning": False,
-        "isPaused": False,
-        "state": "idle",
-        "runState": "idle",
-        "error": error_msg,
-        "countdownSeconds": 0,
-        "connectionRest": {"active": False, "remainingSeconds": 0, "roundsBefore": 0, "roundsCompleted": 0, "restMinutes": 0},
-        "currentProfileIndex": 0,
-        "profiles": [],
-        "stats": {},
-        "activity": [],
-    }
-
-
-def _with_request_id(request: Request, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Add request_id to automation control response for correlation."""
-    rid = getattr(request.state, "request_id", None) or ""
-    return {**data, "request_id": rid}
-
-
-@app.get("/automation/stop")
-@app.get("/api/automation/stop")
-async def automation_stop_get(request: Request):
-    """GET returns current status (idempotent). Use POST to actually stop."""
-    engine = getattr(request.app.state, "automation_engine", None)
-    if engine is None:
-        return _with_request_id(request, _idempotent_stopped_response())
-    return _with_request_id(request, await engine.get_status())
 
 
 @app.post("/automation/stop")
-@app.post("/api/automation/stop")
 async def automation_stop(request: Request):
-    """Stop automation. Never returns 500; always 200 with ok/status/request_id. Persists masterEnabled=False."""
-    _set_master_enabled_db(False)
-    engine = getattr(request.app.state, "automation_engine", None)
-    if engine is None:
-        return _with_request_id(request, _idempotent_stopped_response())
-    try:
-        status = await asyncio.wait_for(engine.stop(), timeout=8)
-        return _with_request_id(request, {**(status or {}), "ok": True})
-    except asyncio.TimeoutError:
-        LOGGER.warning("Automation stop timed out after 8s")
-        _RECENT_ERRORS.append("[stop] timeout after 8s")
-        return _with_request_id(request, _stop_error_response("Stop timed out"))
-    except asyncio.CancelledError:
-        return _with_request_id(request, _idempotent_stopped_response())
-    except Exception as exc:
-        LOGGER.exception("Automation stop failed: %s", exc)
-        try:
-            status = await engine.get_status()
-            if not bool((status or {}).get("isRunning")):
-                return _with_request_id(request, {**(status or {}), "ok": True})
-        except Exception:
-            pass
-        err_msg = f"Stop failed: {exc!s}"
-        _RECENT_ERRORS.append(f"[stop] {datetime.now(timezone.utc).isoformat()} {err_msg}")
-        return _with_request_id(request, _stop_error_response(err_msg))
+    engine = get_automation_engine(request)
+    return await engine.stop()
 
 
 @app.post("/automation/pause")
-@app.post("/api/automation/pause")
 async def automation_pause(request: Request):
     engine = get_automation_engine(request)
     try:
-        return _with_request_id(request, await engine.pause())
+        return await engine.pause()
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
 
 
 @app.post("/automation/resume")
-@app.post("/api/automation/resume")
 async def automation_resume(request: Request):
     engine = get_automation_engine(request)
     try:
-        return _with_request_id(request, await engine.resume())
+        return await engine.resume()
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
-    except Exception as exc:
-        LOGGER.exception("Automation resume failed: %s", exc)
-        raise HTTPException(503, f"Resume failed: {exc!s}")
 
 
 @app.get("/automation/status")
-@app.get("/api/automation/status")
 async def automation_status(request: Request):
     engine = get_automation_engine(request)
-    return _with_request_id(request, await engine.get_status())
+    return await engine.get_status()
 
 
 @app.get("/automation/logs/stream")
@@ -7631,7 +7302,19 @@ async def automation_check_proxy(profile_id: str, request: Request):
 async def automation_test_comment(payload: TestCommentRequest, request: Request):
     engine = get_automation_engine(request)
     try:
-        return await engine.run_test_comment(profile_id=payload.profileId, community_url=payload.communityUrl, prompt=payload.prompt, api_key=payload.apiKey)
+        result = await engine.run_test_comment(profile_id=payload.profileId, community_url=payload.communityUrl, prompt=payload.prompt, api_key=payload.apiKey)
+        if result.get("success") and result.get("postUrl"):
+            with get_db() as db:
+                profile_row = db.execute("SELECT name FROM profiles WHERE id = ?", (payload.profileId,)).fetchone()
+                profile_name = (profile_row["name"] if profile_row else str(payload.profileId)).strip() or str(payload.profileId)
+                group_name = str(payload.communityUrl or "").strip() or "Test"
+                event_id = f"test-comment-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8]}"
+                db.execute(
+                    "INSERT INTO activity_feed (id, profile, groupName, action, timestamp, postUrl) VALUES (?, ?, ?, ?, ?, ?)",
+                    (event_id, profile_name, group_name, "Commented", datetime.now(timezone.utc).isoformat(), result["postUrl"]),
+                )
+                db.commit()
+        return result
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
 

@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 
 // Persistent browser profiles directory
-const config = require('./config-loader');
+const config = require('./config');
 const BROWSER_PROFILES_DIR = config.BROWSER_PROFILES_DIR;
 
 function getProfileDir(profileId) {
@@ -167,34 +167,20 @@ async function loginAndStoreCookies(profileId, email, password, proxy) {
   }
 }
 
-const { buildCookieHeader, ERROR_CODES } = require('./cookieBuilder');
-
-/**
- * @param {string|object} cookieJson
- * @param {{ profileId?: string, email?: string }} [meta] - for debug log only (no values)
- */
-async function validateCookies(cookieJson, meta = {}) {
-  const built = buildCookieHeader(cookieJson, meta);
-  if (built.code) {
-    return { valid: false, error: built.error, code: built.code };
-  }
-  if (built.count === 0 || !built.header) {
-    return { valid: false, error: 'No cookies in list', code: ERROR_CODES.EMPTY_COOKIE_LIST };
-  }
+async function validateCookies(cookieJson) {
   try {
+    const cookies = JSON.parse(cookieJson);
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     const res = await fetch('https://api2.skool.com/self', {
-      headers: { cookie: built.header }
+      headers: { cookie: cookieHeader }
     });
     if (res.ok) {
       const data = await res.json();
       return { valid: true, user: data };
     }
-    if (res.status === 401 || res.status === 403) {
-      return { valid: false, error: 'cookie_expired', code: 'COOKIE_EXPIRED' };
-    }
-    return { valid: false, error: `HTTP ${res.status}`, code: `HTTP_${res.status}` };
+    return { valid: false, error: `HTTP ${res.status}` };
   } catch (err) {
-    return { valid: false, error: err.message, code: 'REQUEST_ERROR' };
+    return { valid: false, error: err.message };
   }
 }
 

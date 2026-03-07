@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 
-const config = require('./config-loader');
+const config = require('./config');
 const BROWSER_PROFILES_DIR = config.BROWSER_PROFILES_DIR;
 
 function getProfileDir(profileId) {

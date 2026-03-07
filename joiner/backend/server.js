@@ -3,7 +3,7 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const { parse } = require('csv-parse/sync');
 const { engageflowDb, joinerDb } = require('./db');
-const config = require('./config-loader');
+const config = require('./config');
 const { acquireLock, releaseLock } = require('./browserLock');
 const { loginAndStoreCookies, validateCookies } = require('./skoolLogin');
 const { getGroups } = require('./skoolApi');
@@ -14,13 +14,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3100;
-
-// Deployment fingerprint: always expose commit hash (Railway sets RAILWAY_GIT_COMMIT_SHA)
-app.use((req, res, next) => {
-  const sha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.ENGAGEFLOW_GIT_SHA || 'unknown';
-  res.setHeader('X-Joiner-Git-Sha', sha);
-  next();
-});
 
 // ==================== HELPERS ====================
 function getSetting(key) {
@@ -97,165 +90,6 @@ function updateProfileState(profileId, fields) {
 const activeRunners = new Map();
 let lastFetchResults = {};
 
-// ==================== PUSH COOKIES TO ENGAGEFLOW (Railway only) ====================
-/** Push cookie_json to EngageFlow DB so sync can populate other Joiner instances. Never logs cookie contents. */
-async function pushCookiesToEngageFlow(profileId, cookieJson) {
-  const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
-  const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
-  if (!baseUrl || !secret || !cookieJson) return;
-  try {
-    const res = await fetch(`${baseUrl}/internal/joiner/profiles/${profileId}/cookie`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-JOINER-SECRET': secret },
-      body: JSON.stringify({ cookie_json: cookieJson }),
-    });
-    if (res.ok) {
-      console.log('[cookie-push] Pushed cookies to EngageFlow for profile', profileId);
-    }
-  } catch (e) {
-    console.warn('[cookie-push] Failed to push to EngageFlow:', e.message);
-  }
-}
-
-// ==================== COOKIE SYNC (Railway only) ====================
-// Match by LOWER(TRIM(email)) so casing/whitespace differences don't block updates.
-async function syncCookiesFromEngageFlow() {
-  const baseUrl = config.ENGAGEFLOW_INTERNAL_URL || config.ENGAGEFLOW_API;
-  const secret = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET;
-  if (!baseUrl || !secret) return { scanned: 0, updated: 0, skipped: 'missing env' };
-  dedupeProfilesByEmail();
-  let res;
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 15000);
-    res = await fetch(`${baseUrl}/internal/joiner/profiles-cookies`, {
-      headers: { 'X-JOINER-SECRET': secret },
-      signal: ctrl.signal,
-    });
-    clearTimeout(t);
-  } catch (e) {
-    console.warn('[cookie-sync] Fetch profiles-cookies failed:', e.message);
-    return { scanned: 0, updated: 0, skipped: 'fetch failed' };
-  }
-  if (res.status !== 200) return { scanned: 0, updated: 0, skipped: `http ${res.status}` };
-  const data = await res.json();
-  const profiles = data.profiles || [];
-  if (profiles.length === 0) return { scanned: 0, updated: 0, skipped: 'no profiles with cookies' };
-  const updateStmt = engageflowDb.prepare(
-    'UPDATE profiles SET cookie_json = ? WHERE LOWER(TRIM(COALESCE(email, ""))) = LOWER(TRIM(?))'
-  );
-  let updated = 0;
-  for (const p of profiles) {
-    const email = (p.email || '').trim();
-    if (!email) continue;
-    const cookieJson = (p.cookie_json || '').trim() || null;
-    const info = updateStmt.run(cookieJson, email);
-    if (info.changes > 0) updated += info.changes;
-  }
-  if (updated > 0) console.log('[cookie-sync] Synced cookies for', updated, 'profile(s) from EngageFlow (by email)');
-  return { scanned: profiles.length, updated };
-}
-
-// Keep newest row per LOWER(TRIM(email)); remove duplicates.
-function dedupeProfilesByEmail() {
-  const rows = engageflowDb.prepare('SELECT rowid, id, email FROM profiles').all();
-  const byKey = {};
-  for (const r of rows) {
-    const key = (r.email || '').trim().toLowerCase() || r.id;
-    if (!byKey[key] || r.rowid > byKey[key].rowid) byKey[key] = r;
-  }
-  const keepRowids = new Set(Object.values(byKey).map((r) => r.rowid));
-  const toDelete = rows.filter((r) => !keepRowids.has(r.rowid)).map((r) => r.rowid);
-  if (toDelete.length === 0) return 0;
-  const del = engageflowDb.prepare('DELETE FROM profiles WHERE rowid = ?');
-  for (const rowid of toDelete) del.run(rowid);
-  console.log('[db] Deduped profiles: removed', toDelete.length, 'duplicate(s) by email');
-  return toDelete.length;
-}
-
-// ==================== ROOT / HEALTH ====================
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'joiner', api: '/api/profiles' });
-});
-
-// ==================== INTERNAL SYNC (secret-gated) ====================
-app.post('/internal/joiner/sync-cookies', async (req, res) => {
-  const secret = (req.headers['x-joiner-secret'] || '').trim();
-  const expected = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET || '';
-  if (!expected || secret !== expected) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  try {
-    const result = await syncCookiesFromEngageFlow();
-    res.json({ success: true, ...result });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message) });
-  }
-});
-
-// ==================== INTERNAL DEBUG DB-INFO (secret-gated) ====================
-const { buildDbInfo } = require('./db-info');
-app.get('/internal/joiner/debug/db-info', (req, res) => {
-  const secret = (req.headers['x-joiner-secret'] || '').trim();
-  const expected = config.ENGAGEFLOW_JOINER_SECRET || process.env.ENGAGEFLOW_JOINER_SECRET || '';
-  if (!expected || secret !== expected) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  try {
-    const info = buildDbInfo({
-      engageflowPath: config.ENGAGEFLOW_DB_PATH,
-      engageflowDb,
-    });
-    res.json(info);
-  } catch (e) {
-    res.status(500).json({ error: String(e.message) });
-  }
-});
-
-// ==================== DEBUG (Railway-only, ENGAGEFLOW_DEBUG=1) ====================
-if (process.env.ENGAGEFLOW_DEBUG === '1') {
-  app.get('/debug/routes', (req, res) => {
-    const routes = [];
-    try {
-      const stack = app._router?.stack || [];
-      stack.forEach((layer) => {
-        if (layer.route) {
-          const methods = Object.keys(layer.route.methods).filter(m => layer.route.methods[m]);
-          methods.forEach(m => routes.push({ method: m.toUpperCase(), path: layer.route.path }));
-        }
-      });
-      res.json({ git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown', routes });
-    } catch (e) {
-      res.status(500).json({ error: String(e.message) });
-    }
-  });
-  app.get('/debug/dbinfo', (req, res) => {
-    try {
-      const fs = require('fs');
-      const dbPath = config.ENGAGEFLOW_DB_PATH;
-      const size = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
-      let profilesCount = 0;
-      let profilesWithCookieJson = 0;
-      if (fs.existsSync(dbPath) && size > 0) {
-        const r = engageflowDb.prepare('SELECT COUNT(*) as c FROM profiles').get();
-        profilesCount = r?.c ?? 0;
-        const r2 = engageflowDb.prepare(
-          "SELECT COUNT(*) as c FROM profiles WHERE cookie_json IS NOT NULL AND length(trim(COALESCE(cookie_json,''))) > 0"
-        ).get();
-        profilesWithCookieJson = r2?.c ?? 0;
-      }
-      res.json({
-        db_path: dbPath,
-        file_size_bytes: size,
-        profiles_count: profilesCount,
-        profiles_with_cookie_json: profilesWithCookieJson,
-      });
-    } catch (e) {
-      res.status(500).json({ error: String(e.message) });
-    }
-  });
-}
-
 // ==================== PROFILES (read from EngageFlow) ====================
 app.get('/api/profiles', (req, res) => {
   const profiles = engageflowDb.prepare(`
@@ -264,21 +98,14 @@ app.get('/api/profiles', (req, res) => {
   `).all();
 
   // Enrich with joiner-specific state + queue stats
-  // Validation: profile cannot be "ready" if cookie_json is empty (expose as paused)
   const result = profiles.map(p => {
     const state = joinerDb.prepare('SELECT * FROM joiner_profile_state WHERE profile_id = ?').get(p.id) || {};
     const queueTotal = joinerDb.prepare('SELECT COUNT(*) as c FROM join_queue WHERE profile_id = ?').get(p.id)?.c || 0;
     const joinedCount = joinerDb.prepare("SELECT COUNT(*) as c FROM join_queue WHERE profile_id = ? AND status = 'joined'").get(p.id)?.c || 0;
-    const hasCookies = !!(p.cookie_json && String(p.cookie_json).trim());
-    const authError = state.auth_error || null;
-    const authStatus = hasCookies ? (authError ? 'expired' : 'connected') : 'disconnected';
-    const effectiveStatus = (p.status === 'ready' && !hasCookies) ? 'paused' : (p.status || 'paused');
-    const { cookie_json, ...rest } = p;
     return {
-      ...rest,
-      status: effectiveStatus,
-      auth_status: authStatus,
-      auth_error: authError,
+      ...p,
+      auth_status: p.cookie_json ? 'connected' : 'disconnected',
+      auth_error: state.auth_error || null,
       daily_count: state.daily_count || 0,
       daily_cap: state.daily_cap || 50,
       is_running: state.is_running || 0,
@@ -291,9 +118,8 @@ app.get('/api/profiles', (req, res) => {
       password_plain: state.password_plain || null,
       queue_total: queueTotal,
       joined_count: joinedCount,
-      auth_method: hasCookies ? 'cookies' : 'none',
-      has_cookie_json: hasCookies,
-      created_at: null,
+      auth_method: p.cookie_json ? 'cookies' : 'none',
+      created_at: null, // Not available in EngageFlow profiles
     };
   });
   res.json(result);
@@ -313,31 +139,19 @@ app.post('/api/profiles/:id/store-password', (req, res) => {
 // Profiles are created and deleted in EngageFlow only
 
 // ==================== AUTH ====================
-const SKOOL_AUTH_REQUEST = 'GET https://api2.skool.com/self';
-
 app.get('/api/profiles/:id/skool-auth', async (req, res) => {
   const profile = engageflowDb.prepare('SELECT * FROM profiles WHERE id = ?').get(req.params.id);
   if (!profile) return res.status(404).json({ error: 'Not found' });
-  const cookieJson = profile.cookie_json;
-  const hasCookieJson = !!(cookieJson && String(cookieJson).trim());
-  if (!hasCookieJson) {
-    const msg = `Auth failed: NO_COOKIE_JSON profile_id=${req.params.id} email=${profile.email || '(no email)'} request=${SKOOL_AUTH_REQUEST}`;
-    writeLog(req.params.id, 'error', 'test_auth', null, msg);
-    return res.json({ valid: false, error: 'No cookies', code: 'NO_COOKIE_JSON' });
-  }
+  if (!profile.cookie_json) return res.json({ valid: false, error: 'No cookies' });
 
-  const result = await validateCookies(cookieJson, { profileId: req.params.id, email: profile.email });
+  const result = await validateCookies(profile.cookie_json);
   const now = new Date().toISOString();
   if (result.valid) {
     updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth', auth_error: null });
   } else {
-    const code = result.code || 'AUTH_FAILED';
-    updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth_failed', auth_error: code });
-    writeLog(req.params.id, 'error', 'test_auth', null, `Auth failed: ${code} profile_id=${req.params.id} email=${profile.email || '(no email)'} request=${SKOOL_AUTH_REQUEST}`);
+    updateProfileState(req.params.id, { last_action_at: now, last_action_type: 'test_auth_failed', auth_error: result.error });
   }
-  if (result.valid) {
-    writeLog(req.params.id, 'info', 'test_auth', null, 'Auth valid');
-  }
+  writeLog(req.params.id, result.valid ? 'info' : 'error', 'test_auth', null, result.valid ? 'Auth valid' : `Auth failed: ${result.error}`);
   res.json(result);
 });
 
@@ -371,10 +185,10 @@ app.post('/api/profiles/:id/paste-cookies', async (req, res) => {
   const now = new Date().toISOString();
 
   if (result.valid) {
+    // Write cookies to EngageFlow's shared profiles table
     engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(cookieJson, req.params.id);
     updateProfileState(req.params.id, { last_login_at: now, last_action_at: now, auth_error: null });
     writeLog(req.params.id, 'info', 'cookie_paste', null, 'Cookie paste successful — authenticated');
-    pushCookiesToEngageFlow(req.params.id, cookieJson).catch(() => {});
     res.json({ success: true, message: 'Cookies validated and stored' });
   } else {
     writeLog(req.params.id, 'error', 'cookie_paste_failed', null, `Cookie validation failed: ${result.error}`);
@@ -414,10 +228,10 @@ async function connectProfile(profileId, email, password, proxy) {
   const now = new Date().toISOString();
 
   if (result.success) {
+    // Write cookies to EngageFlow's shared profiles table
     engageflowDb.prepare('UPDATE profiles SET cookie_json = ? WHERE id = ?').run(result.cookieJson, profileId);
     updateProfileState(profileId, { last_login_at: now, last_action_at: now, auth_error: null, password_plain: password });
     writeLog(profileId, 'info', 'login_success', null, 'Login successful — cookies stored');
-    pushCookiesToEngageFlow(profileId, result.cookieJson).catch(() => {});
   } else {
     updateProfileState(profileId, { auth_error: result.message, last_action_at: now });
     writeLog(profileId, 'error', 'login_failed', null, `Login failed: ${result.message}`);
@@ -1046,11 +860,4 @@ cron.schedule('0 8,20 * * *', async () => {
 
 app.listen(PORT, () => {
   console.log(`EngageFlow Joiner backend running on port ${PORT}`);
-  if (process.env.RAILWAY === 'true') {
-    syncCookiesFromEngageFlow().then((r) => {
-      if (r.skipped !== 'missing env' && r.synced !== undefined) {
-        console.log('[cookie-sync] Startup sync:', r.synced, 'profile(s) updated');
-      }
-    }).catch((e) => console.warn('[cookie-sync] Startup sync failed:', e.message));
-  }
 });

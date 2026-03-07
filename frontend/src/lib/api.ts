@@ -9,6 +9,7 @@ import type {
   LogEntry,
   Profile,
   QueueItem,
+  QueuePreviewItem,
 } from "./types";
 
 const normalizeBase = (value: string) => value.replace(/\/+$/, "");
@@ -77,15 +78,6 @@ async function resolveBackendBaseUrl(path: string): Promise<string> {
   }
 
   resolveBaseInFlight = (async () => {
-    if (typeof window !== "undefined") {
-      const hostname = window.location.hostname;
-      const isLocalHost = /^(localhost|127\.0\.0\.1)$/i.test(hostname);
-      if (!isLocalHost && !ENV_BASE_URL) {
-        throw new Error(
-          "VITE_BACKEND_URL must be set when deployed (e.g. your app's public URL in Coolify/Railway frontend build env).",
-        );
-      }
-    }
     for (const candidate of getFallbackBaseCandidates()) {
       const normalized = normalizeBase(candidate);
       try {
@@ -125,15 +117,12 @@ async function resolveBackendBaseUrl(path: string): Promise<string> {
 export class ApiError extends Error {
   status: number;
   error: string;
-  requestId?: string;
 
-  constructor(status: number, error: string, message: string, requestId?: string) {
-    const displayMessage = requestId ? `${message} (request_id: ${requestId})` : message;
-    super(displayMessage);
+  constructor(status: number, error: string, message: string) {
+    super(message);
     this.name = "ApiError";
     this.status = status;
     this.error = error;
-    this.requestId = requestId;
   }
 }
 
@@ -165,9 +154,7 @@ function parseJsonSafe(text: string): unknown | null {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const primaryBase = await resolveBackendBaseUrl(path);
-  const baseCandidates = ENV_BASE_URL
-    ? [primaryBase]
-    : [primaryBase, ...getFallbackBaseCandidates().map(normalizeBase).filter((item) => item !== primaryBase)];
+  const baseCandidates = [primaryBase, ...getFallbackBaseCandidates().map(normalizeBase).filter((item) => item !== primaryBase)];
   let response: Response | null = null;
 
   for (const base of baseCandidates) {
@@ -207,21 +194,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     (text && !payload ? text : "") ||
     `${response.status} ${response.statusText}`;
   const machineError = payload?.error || "request_error";
-  const requestId = response.headers.get("X-Request-Id") ?? undefined;
 
   if (!response.ok) {
-    throw new ApiError(response.status, machineError, message, requestId);
+    throw new ApiError(response.status, machineError, message);
   }
   if (response.status === 204) {
     return undefined as T;
   }
 
   if (payload && payload.success === false) {
-    throw new ApiError(response.status, machineError, message, requestId);
+    throw new ApiError(response.status, machineError, message);
   }
 
   if (parsed === null) {
-    throw new ApiError(response.status, "invalid_response", "Invalid server response", requestId);
+    throw new ApiError(response.status, "invalid_response", "Invalid server response");
   }
 
   return parsed as T;
@@ -234,7 +220,6 @@ export interface AutomationEngineStatus {
   state: string;
   runState: string;
   countdownSeconds: number;
-  nextScheduledFor?: string | null;
   connectionRest?: {
     active: boolean;
     remainingSeconds: number;
@@ -255,6 +240,10 @@ export interface CommunityFetchProfileResult {
   created: number;
   updated: number;
   skipped: number;
+  total?: number | null;
+  joined?: number | null;
+  pendingExcluded?: number | null;
+  unknownExcluded?: number | null;
   error?: string | null;
 }
 
@@ -265,6 +254,10 @@ export interface CommunityFetchResponse {
   created: number;
   updated: number;
   skipped: number;
+  totalFetched?: number | null;
+  totalJoined?: number | null;
+  totalPendingExcluded?: number | null;
+  totalUnknownExcluded?: number | null;
   results: CommunityFetchProfileResult[];
 }
 
@@ -314,14 +307,15 @@ export const api = {
   getAutomationSettings: () => request<AutomationSettings>("/automation/settings"),
   updateAutomationSettings: (payload: AutomationSettings) => request<AutomationSettings>("/automation/settings", { method: "PUT", body: JSON.stringify(payload) }),
 
-  getQueue: (limit = 30) => request<QueueItem[]>(`/queue?limit=${Math.max(1, Math.min(100, limit || 30))}`),
+  getQueue: () => request<QueueItem[]>("/queue"),
+  getQueuePreview: (limit = 50, days = 2) => request<QueuePreviewItem[]>(`/queue/preview?limit=${limit}&days=${days}`),
   updateQueueItem: (id: string, payload: Partial<QueueItem>) => request<QueueItem>(`/queue/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   queueStartSoon: (id: string, seconds = 10) => request<QueueItem>(`/queue/${id}/start-soon?seconds=${Math.max(1, Math.floor(seconds))}`, { method: "POST" }),
   deleteQueueItem: (id: string) => request<{ success: boolean }>(`/queue/${id}`, { method: "DELETE" }),
 
   getLogs: (limit = 500) => request<LogEntry[]>(`/logs?limit=${Math.max(50, Math.min(2000, Math.floor(limit || 500)))}`),
   clearLogs: () => request<{ success: boolean; deleted: number }>("/logs", { method: "DELETE" }),
-  getActivity: (limit = 100) => request<ActivityEntry[]>(`/activity?limit=${Math.max(1, Math.min(500, limit || 100))}`),
+  getActivity: () => request<ActivityEntry[]>("/activity"),
   getAnalytics: () => request<AnalyticsData>("/analytics"),
 
   getConversations: (sync = false) => request<Conversation[]>(`/conversations${sync ? "?sync=true" : ""}`),

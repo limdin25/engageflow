@@ -19,36 +19,38 @@ dist/
 dist-ssr/
 *.zip
 
+# Env and secrets
+.env
+.env.*
+backend/.env
+.railway-secrets
+
 # Backend artifacts
 backend/__pycache__/
 backend/*.py[cod]
 backend/*.db
-backend/*.db-wal
 backend/*.db-shm
+backend/*.db-wal
+backend/*.sqlite
 backend/skool_accounts/
 backend/skool_daily_counters_state.json
 backend/skool_global_blacklist.json
 backend/skool_run_state.json
 backend/config.local.json
 backend/logs/
-backend/.env
-.env
-.env.*
-.railway-secrets
-.railway/
-
-# VPS shared data (do not commit)
-engageflow-shared
-/root/engageflow-shared
-
-# Python venv
-venv/
-.venv/
 backend/venv/
+backend/.venv/
+backend/.claude_state/
+backend/.claude/
 
 # Python cache (fallback)
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+
+# Playwright cache
+playwright/.cache/
 
 # Editor directories and files
 .vscode/*

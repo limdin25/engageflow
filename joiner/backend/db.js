@@ -1,78 +1,10 @@
 const Database = require('better-sqlite3');
-const fs = require('fs');
-const path = require('path');
-const config = require('./config-loader');
-
-// Ensure directory exists for DB path (Railway /data volume)
-const engageflowPath = config.ENGAGEFLOW_DB_PATH;
-const engageflowDir = path.dirname(engageflowPath);
-if (!fs.existsSync(engageflowDir)) {
-  fs.mkdirSync(engageflowDir, { recursive: true });
-}
+const config = require('./config');
 
 // EngageFlow DB — profiles, browser_locks (READ for profiles, READ/WRITE for locks)
-const engageflowDb = new Database(engageflowPath, {
+const engageflowDb = new Database(config.ENGAGEFLOW_DB_PATH, {
     readonly: false  // Need write access for browser_locks only
 });
-engageflowDb.pragma('journal_mode = WAL');
-engageflowDb.pragma('synchronous = NORMAL');
-engageflowDb.pragma('busy_timeout = 5000');
-
-// Bootstrap: create profiles + browser_locks if missing (Railway empty DB)
-engageflowDb.exec(`
-    CREATE TABLE IF NOT EXISTS profiles (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL, password TEXT NOT NULL,
-        email TEXT, proxy TEXT, avatar TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'paused',
-        dailyUsage INTEGER NOT NULL DEFAULT 0, groupsConnected INTEGER NOT NULL DEFAULT 0,
-        cookie_json TEXT, source TEXT, connected_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS browser_locks (
-        profile_id TEXT PRIMARY KEY, locked_by TEXT NOT NULL, locked_at TEXT NOT NULL
-    );
-`);
-
-// Migration: ensure profiles.cookie_json exists (idempotent; fixes local DBs created by EngageFlow without column)
-const profileCols = engageflowDb.prepare('PRAGMA table_info(profiles)').all().map(r => r.name);
-if (!profileCols.includes('cookie_json')) {
-  engageflowDb.exec('ALTER TABLE profiles ADD COLUMN cookie_json TEXT');
-  console.log('[db] Migration: added cookie_json to profiles');
-}
-
-// Fail fast if required column missing
-const profileColsAfter = engageflowDb.prepare('PRAGMA table_info(profiles)').all().map(r => r.name);
-if (!profileColsAfter.includes('cookie_json')) {
-  throw new Error('Joiner requires profiles.cookie_json. DB schema missing required column. Refusing to start.');
-}
-
-// Startup log: db source of truth (no secrets)
-const { getSchemaInfo } = require('./db-info');
-const dbBasename = path.basename(engageflowPath);
-const { schema_hash } = getSchemaInfo(engageflowDb);
-console.log('[db] engageflow db_kind=sqlite db_path=' + dbBasename + ' schema_hash=' + schema_hash);
-
-// Railway: sync profiles from EngageFlow API when local DB is empty (async, non-blocking)
-if (process.env.RAILWAY === 'true' && config.ENGAGEFLOW_API) {
-  const count = engageflowDb.prepare('SELECT COUNT(*) as c FROM profiles').get().c;
-  if (count === 0) {
-    const apiUrl = config.ENGAGEFLOW_API.replace(/\/$/, '');
-    const url = apiUrl.startsWith('https') ? apiUrl : `https://${apiUrl}`;
-    fetch(`${url}/profiles`).then((r) => r.json()).then((profiles) => {
-      if (Array.isArray(profiles) && profiles.length > 0) {
-        const ins = engageflowDb.prepare(
-          'INSERT OR REPLACE INTO profiles (id, name, username, password, email, proxy, avatar, status, dailyUsage, groupsConnected, cookie_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        for (const p of profiles) {
-          ins.run(
-            p.id, p.name || '', p.username || '', p.password || '',
-            p.email || null, p.proxy || null, p.avatar || '👤', p.status || 'paused',
-            p.dailyUsage ?? 0, p.groupsConnected ?? 0, p.cookie_json || null
-          );
-        }
-        console.log(`[db] Synced ${profiles.length} profiles from EngageFlow API`);
-      }
-    }).catch((e) => console.warn('[db] Profile sync failed:', e.message));
-  }
-}
 
 // Joiner DB — join_queue, profile_discovery_info, join_logs
 const joinerDb = new Database(config.JOINER_DB_PATH);
@@ -168,6 +100,8 @@ joinerDb.exec(`
 `);
 
 // Migrate data from old DB if it exists and joiner tables are empty
+const path = require('path');
+const fs = require('fs');
 const oldDbPath = path.resolve(__dirname, 'community-join-manager.db');
 if (fs.existsSync(oldDbPath)) {
     const queueCount = joinerDb.prepare('SELECT COUNT(*) as c FROM join_queue').get().c;

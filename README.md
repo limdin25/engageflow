@@ -1,4 +1,4 @@
-# EngageFlow
+# SkoolProjectUP
 
 Automation platform for Skool workflows:
 - backend: FastAPI API + automation engine
@@ -83,16 +83,7 @@ powershell -ExecutionPolicy Bypass -File scripts/cleanup_handover.ps1
 bash scripts/cleanup_handover.sh
 ```
 
-## Railway Deployment
-
-- **DEV:** https://selfless-renewal-dev.up.railway.app (frontend) | https://engageflow-dev.up.railway.app (backend)
-- **Project:** efficient-ambition | **Service (backend):** engageflow
-- See `docs/RAILWAY_ACCESS.md` for Cursor/CLI setup
-- See `docs/SECRETS_SETUP.md` for GitHub Actions secrets
-
 ## Extra Docs
 
-- `docs/PROJECT_STATE.md` — Current state, Railway vars, verification
-- `docs/DISCIPLINE.md` — Governance rules
 - Backend setup/details: `backend/README.md`
 - Frontend setup/details: `frontend/README.md`

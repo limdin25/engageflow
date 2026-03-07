@@ -10,6 +10,8 @@ export interface Profile {
   status: "running" | "paused" | "idle" | "checking" | "ready" | "blocked" | "captcha" | "logged_out" | string;
   dailyUsage: number;
   groupsConnected: number;
+  source?: string;
+  connected_at?: string;
 }
 
 export interface Community {
@@ -84,6 +86,12 @@ export interface QueueItem {
   scheduledFor: string;
   priorityScore: number;
   countdown: number;
+}
+
+export interface QueuePreviewItem extends QueueItem {
+  isProjected: boolean;
+  dayLabel: string;
+  actionLabel: string;
 }
 
 export interface LogEntry {
