@@ -621,6 +621,26 @@ def _get_db_status_payload() -> Dict[str, Any]:
     }
 
 
+def _api_root_response():
+    return {
+        "service": "EngageFlow API",
+        "docs": "Use /api/profiles, /api/db-status, /api/automation/status, etc.",
+    }
+
+
+@app.get("/api")
+@app.get("/api/")
+def api_root():
+    """Root API info so GET /api and GET /api/ do not return 404."""
+    return _api_root_response()
+
+
+@app.get("/")
+def root():
+    """Backend root (e.g. when request path was /api/ and middleware stripped to /)."""
+    return _api_root_response()
+
+
 @app.get("/api/db-status")
 async def api_db_status(request: Request):
     """DB diagnostics. Always available. Never 500."""
