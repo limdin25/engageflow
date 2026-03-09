@@ -449,6 +449,15 @@ class AutomationEngine:
         self._queue_post_cooldown_until: Dict[str, float] = {}
         self._queue_community_cooldown_until: Dict[str, float] = {}
         self._prefill_skip_log_state: Dict[str, Dict[str, float]] = {}
+        # FIX 1: Community-level editor failure tracking (key = "profileId:communityId")
+        self._community_editor_failures: Dict[str, int] = {}
+        # FIX 1: Per-profile community skip list for today (key = profileId, value = set of communityIds)
+        self._community_skip_today: Dict[str, Set[str]] = {}
+        self._community_skip_today_date: str = datetime.now().strftime("%Y-%m-%d")
+        # FIX 2: Post-level editor failure tracking (key = post URL)
+        self._post_editor_failures: Dict[str, int] = {}
+
+        self._ensure_skipped_posts_table()
 
         self._hydrate_state_from_disk()
     async def subscribe(self) -> asyncio.Queue[Dict[str, Any]]:
@@ -1368,7 +1377,8 @@ class AutomationEngine:
                             daily_exhausted_wait_log_ts = now_ts
                             await self.publish_log(
                                 (
-                                    "[SKOOL] All in-schedule communities reached today's limits "
+                                    f"All accounts have reached their daily comment limit (cap: {settings.get('globalDailyCapPerAccount', '?')}/account). Pausing until reset. "
+                                    f"| [SKOOL] All in-schedule communities reached today's limits "
                                     f"(dailyCap={settings.get('globalDailyCapPerAccount', '?')} per profile); "
                                     f"waiting {wait_seconds}s for daily reset or settings changes"
                                 ),
@@ -1569,7 +1579,9 @@ class AutomationEngine:
                         profile_network_fail_streak[profile_key] = max(0, current_streak - 1)
                 await self.publish_log(
                     (
-                        f"[SKOOL] Profile pass done: posted={int(run_result.comments_posted or 0)} "
+                        f"{label} — Pass complete: {int(run_result.comments_posted or 0)} comments posted, "
+                        f"{int(run_result.skipped_count or 0)} posts skipped "
+                        f"| [SKOOL] Profile pass done: posted={int(run_result.comments_posted or 0)} "
                         f"skipped={int(run_result.skipped_count or 0)} "
                         f"blacklisted={int(run_result.blacklisted_count or 0)}"
                     ),
@@ -2106,7 +2118,10 @@ class AutomationEngine:
                         "timestamp": datetime.now().strftime("%H:%M:%S"),
                         "profile": str(profile_label),
                         "status": "success",
-                        "message": f"[SKOOL] Due queue items: {len(due_queue_items)}",
+                        "message": (
+                            f"{profile_label} — {'No tasks due right now' if len(due_queue_items) == 0 else f'{len(due_queue_items)} task(s) ready to run'}. "
+                            f"| [SKOOL] Due queue items: {len(due_queue_items)}"
+                        ),
                     }
                 )
             due_by_community: Dict[str, List[Dict[str, str]]] = {}
@@ -2719,6 +2734,35 @@ class AutomationEngine:
                         try:
                             post_url = selected["post_url"]
                             task_ref = str(selected.get("queue_id") or _extract_task_ref_from_post_url(post_url) or "n/a")
+                            # FIX 2: Skip permanently skipped posts
+                            if self._is_post_skipped(post_url, profile_id):
+                                self._remove_queue_item(profile_id, post_url)
+                                result.skipped_count += 1
+                                self._insert_log(
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                        "profile": str(profile_label),
+                                        "status": "info",
+                                        "message": f"[SKOOL] Post previously skipped (permanent), not attempting: {post_url}",
+                                    }
+                                )
+                                continue
+                            # FIX 1: Skip communities that failed too many times today
+                            _sel_comm_id = str(selected.get("community_id") or community.get("id", "") or "").strip()
+                            if _sel_comm_id and self._is_community_skipped_today(profile_id, _sel_comm_id):
+                                self._remove_queue_item(profile_id, post_url)
+                                result.skipped_count += 1
+                                self._insert_log(
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                        "profile": str(profile_label),
+                                        "status": "info",
+                                        "message": f"[SKOOL] Community {_sel_comm_id} skipped for today (editor failures). Trying a different community.",
+                                    }
+                                )
+                                continue
                             if bool(selected.get("from_queue")) and not bool(selected.get("_queue_claimed")):
                                 # Remove active task from queue immediately when execution starts.
                                 self._remove_queue_item(profile_id, post_url)
@@ -3236,15 +3280,68 @@ class AutomationEngine:
                                 )
                             else:
                                 if bool(selected.get("from_queue")) and send_error_detail == "editor_not_visible":
-                                    # This post/thread often has delayed or unavailable editor.
-                                    # Cool it down longer instead of burning immediate retries/cycles.
+                                    # FIX 2: Track post-level failures
+                                    _post_fail_count = self._record_post_editor_failure(post_url, profile_id)
+                                    # FIX 1: Track community-level failures
+                                    _comm_id_for_fail = str(community.get("id", "") or "").strip()
+                                    _comm_fail_count = self._record_community_editor_failure(profile_id, _comm_id_for_fail) if _comm_id_for_fail else 0
+                                    _attempt_num = int(self._queue_submit_fail_streak.get(_queue_post_key(post_url), 0) or 0) + 1
+
+                                    # FIX 2: Post permanently skipped after 3 failures
+                                    if _post_fail_count >= 3:
+                                        self._remove_queue_item(profile_id, post_url)
+                                        result.skipped_count += 1
+                                        self._insert_log(
+                                            {
+                                                "id": str(uuid.uuid4()),
+                                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                                "profile": str(profile_label),
+                                                "status": "error",
+                                                "message": (
+                                                    f"[SKOOL] Post permanently skipped after {_post_fail_count} failures: {post_url} "
+                                                    f"| send_or_dom_error:editor_not_visible_cooldown_attempt_{_attempt_num}"
+                                                ),
+                                            }
+                                        )
+                                        try:
+                                            page.go_back(wait_until="domcontentloaded")
+                                            page.wait_for_timeout(2000)
+                                        except Exception:
+                                            pass
+                                        continue
+
+                                    # FIX 1: Community skipped after 2 failures
+                                    if _comm_fail_count >= 2:
+                                        self._remove_queue_item(profile_id, post_url)
+                                        result.skipped_count += 1
+                                        self._insert_log(
+                                            {
+                                                "id": str(uuid.uuid4()),
+                                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                                "profile": str(profile_label),
+                                                "status": "error",
+                                                "message": (
+                                                    f"[SKOOL] Community skipped after {_comm_fail_count} editor failures: "
+                                                    f"{_comm_id_for_fail} profile={profile_id}. Will try a different community. "
+                                                    f"| send_or_dom_error:editor_not_visible_cooldown_attempt_{_attempt_num}"
+                                                ),
+                                            }
+                                        )
+                                        try:
+                                            page.go_back(wait_until="domcontentloaded")
+                                            page.wait_for_timeout(2000)
+                                        except Exception:
+                                            pass
+                                        continue
+
+                                    # Count < 2 on community AND < 3 on post: requeue with cooldown (existing behaviour)
                                     requeued_editor = _requeue_due_task(
                                         selected,
                                         post_url,
                                         delay_seconds=QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS,
                                         reason=(
                                             "send_or_dom_error:editor_not_visible_cooldown"
-                                            f"_attempt_{int(self._queue_submit_fail_streak.get(_queue_post_key(post_url), 0) or 0) + 1}"
+                                            f"_attempt_{_attempt_num}"
                                         ),
                                         status="retry",
                                     )
@@ -3256,9 +3353,8 @@ class AutomationEngine:
                                                 "profile": str(profile_label),
                                                 "status": "retry",
                                                 "message": (
-                                                    f"[SKOOL] Task postponed task={task_ref} "
-                                                    "reason=editor_not_visible_cooldown "
-                                                    f"cooldown={QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS}s"
+                                                    f"[SKOOL] Comment box not found on this post (attempt {_attempt_num}). Will retry in 5 min. "
+                                                    f"task={task_ref} | send_or_dom_error:editor_not_visible_cooldown cooldown={QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS}s"
                                                 ),
                                             }
                                         )
@@ -4081,6 +4177,115 @@ class AutomationEngine:
         except Exception:
             pass
         return conn
+
+    # -- FIX 1/2: Editor failure tracking helpers --------------------------
+
+    def _ensure_skipped_posts_table(self) -> None:
+        try:
+            with self._db() as db:
+                db.execute(
+                    """CREATE TABLE IF NOT EXISTS skipped_posts (
+                        post_url TEXT NOT NULL,
+                        profile_id TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        skipped_at TEXT NOT NULL,
+                        PRIMARY KEY (post_url, profile_id)
+                    )"""
+                )
+                db.commit()
+        except Exception:
+            pass
+
+    def _reset_community_skip_if_new_day(self) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._community_skip_today_date:
+            self._community_editor_failures.clear()
+            self._community_skip_today.clear()
+            self._post_editor_failures.clear()
+            self._community_skip_today_date = today
+
+    def _is_community_skipped_today(self, profile_id: str, community_id: str) -> bool:
+        self._reset_community_skip_if_new_day()
+        return community_id in self._community_skip_today.get(profile_id, set())
+
+    def _record_community_editor_failure(self, profile_id: str, community_id: str) -> int:
+        self._reset_community_skip_if_new_day()
+        key = f"{profile_id}:{community_id}"
+        self._community_editor_failures[key] = self._community_editor_failures.get(key, 0) + 1
+        count = self._community_editor_failures[key]
+        if count >= 2:
+            self._community_skip_today.setdefault(profile_id, set()).add(community_id)
+        return count
+
+    def _record_post_editor_failure(self, post_url: str, profile_id: str) -> int:
+        self._post_editor_failures[post_url] = self._post_editor_failures.get(post_url, 0) + 1
+        count = self._post_editor_failures[post_url]
+        if count >= 3:
+            self._add_skipped_post(post_url, profile_id, f"editor_not_visible x{count}")
+        return count
+
+    def _add_skipped_post(self, post_url: str, profile_id: str, reason: str) -> None:
+        try:
+            with self._db() as db:
+                db.execute(
+                    "INSERT OR REPLACE INTO skipped_posts (post_url, profile_id, reason, skipped_at) VALUES (?, ?, ?, ?)",
+                    (post_url, profile_id, reason, datetime.now().isoformat(timespec="seconds")),
+                )
+                db.commit()
+        except Exception:
+            pass
+
+    def _is_post_skipped(self, post_url: str, profile_id: str) -> bool:
+        try:
+            with self._db() as db:
+                row = db.execute(
+                    "SELECT 1 FROM skipped_posts WHERE post_url = ? AND profile_id = ?",
+                    (post_url, profile_id),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            return False
+
+    def _get_skipped_posts(self) -> List[Dict[str, Any]]:
+        try:
+            with self._db() as db:
+                rows = db.execute("SELECT post_url, profile_id, reason, skipped_at FROM skipped_posts ORDER BY skipped_at DESC").fetchall()
+                return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def _remove_skipped_post(self, post_url: str) -> None:
+        try:
+            with self._db() as db:
+                db.execute("DELETE FROM skipped_posts WHERE post_url = ?", (post_url,))
+                db.commit()
+        except Exception:
+            pass
+
+    def _clear_all_skipped_posts(self) -> None:
+        try:
+            with self._db() as db:
+                db.execute("DELETE FROM skipped_posts")
+                db.commit()
+        except Exception:
+            pass
+
+    def get_community_editor_failures(self) -> Dict[str, int]:
+        self._reset_community_skip_if_new_day()
+        return dict(self._community_editor_failures)
+
+    def reset_community_editor_failures(self, community_id: Optional[str] = None) -> None:
+        if community_id:
+            keys_to_remove = [k for k in self._community_editor_failures if k.endswith(f":{community_id}")]
+            for k in keys_to_remove:
+                self._community_editor_failures.pop(k, None)
+            for skip_set in self._community_skip_today.values():
+                skip_set.discard(community_id)
+        else:
+            self._community_editor_failures.clear()
+            self._community_skip_today.clear()
+
+    # -- END FIX 1/2 helpers --
 
     def _write_with_retry(self, operation: Callable[[], None], attempts: int = 10, sleep_seconds: float = 0.2) -> None:
         last_exc: Optional[Exception] = None

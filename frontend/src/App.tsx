@@ -14,6 +14,7 @@ import KeywordsPage from "./pages/KeywordsPage";
 import AutomationPage from "./pages/AutomationPage";
 import LogsPage from "./pages/LogsPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
+import AdminPage from "./pages/AdminPage";
 import NotFound from "./pages/NotFound";
 import LockScreen from "./pages/LockScreen";
 import OwnerPage from "./pages/OwnerPage";
@@ -64,6 +65,7 @@ const App = () => (
               <Route path="/keywords" element={<KeywordsPage />} />
               <Route path="/automation" element={<AutomationPage />} />
               <Route path="/logs" element={<LogsPage />} />
+              <Route path="/admin" element={<AdminPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
             </Route>
             <Route path="*" element={<NotFound />} />

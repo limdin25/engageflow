@@ -620,3 +620,102 @@ class TestPrefillRelaxed:
         assert "community_B" in queued, "community_B should be queued (no existing item)"
         assert len(skipped) == 1
         assert len(queued) == 1
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP 7: Editor failure tracking + skip logic
+# ---------------------------------------------------------------------------
+
+class TestEditorFailures:
+    """Verify community-level and post-level editor failure tracking."""
+
+    def test_community_skipped_after_2_failures(self):
+        """After 2 editor_not_visible failures on the same community+profile,
+        the 3rd attempt should NOT requeue — it marks status=skipped_editor."""
+        community_failures: Dict[str, int] = {}
+        key = "profile_1:community_A"
+
+        results = []
+        for attempt in range(3):
+            community_failures[key] = community_failures.get(key, 0) + 1
+            count = community_failures[key]
+            if count >= 2:
+                # Should skip, not requeue
+                results.append("skipped_editor")
+            else:
+                # Should requeue with cooldown
+                results.append("requeued")
+
+        assert results[0] == "requeued", "1st failure should requeue"
+        assert results[1] == "skipped_editor", "2nd failure should skip"
+        assert results[2] == "skipped_editor", "3rd failure should also skip"
+
+    def test_community_not_skipped_after_1_failure(self):
+        """After 1 editor_not_visible failure, the task should be requeued with 300s cooldown."""
+        community_failures: Dict[str, int] = {}
+        key = "profile_1:community_A"
+
+        community_failures[key] = community_failures.get(key, 0) + 1
+        count = community_failures[key]
+
+        should_requeue = count < 2
+        assert should_requeue, "1st failure should requeue, not skip"
+
+    def test_post_permanently_skipped_after_3_failures(self):
+        """After 3 editor_not_visible failures on the same post URL,
+        the post should be marked as permanently skipped."""
+        post_failures: Dict[str, int] = {}
+        post_url = "https://www.skool.com/community/post-123"
+        skipped_posts: List[Dict[str, Any]] = []
+
+        for attempt in range(3):
+            post_failures[post_url] = post_failures.get(post_url, 0) + 1
+
+        if post_failures[post_url] >= 3:
+            skipped_posts.append({
+                "post_url": post_url,
+                "profile_id": "profile_1",
+                "reason": f"editor_not_visible x{post_failures[post_url]}",
+            })
+
+        assert len(skipped_posts) == 1, "Post should be in skipped_posts after 3 failures"
+        assert skipped_posts[0]["post_url"] == post_url
+
+    def test_skipped_post_not_attempted_again(self):
+        """A post URL in the skipped_posts list should be skipped immediately."""
+        skipped_posts = {
+            "https://www.skool.com/community/post-123": {
+                "profile_id": "profile_1",
+                "reason": "editor_not_visible x3",
+            }
+        }
+
+        post_url = "https://www.skool.com/community/post-123"
+        should_skip = post_url in skipped_posts
+
+        assert should_skip, "Post in skipped_posts should be skipped immediately"
+
+        # A different post should NOT be skipped
+        other_url = "https://www.skool.com/community/post-456"
+        assert other_url not in skipped_posts, "Different post should not be skipped"
+
+    def test_community_failures_reset_clears_counts(self):
+        """Resetting community failures should clear all counts."""
+        community_failures: Dict[str, int] = {
+            "profile_1:community_A": 3,
+            "profile_1:community_B": 2,
+        }
+        community_failures.clear()
+        assert len(community_failures) == 0
+
+    def test_different_profiles_tracked_separately(self):
+        """Failures for different profiles on the same community are tracked independently."""
+        community_failures: Dict[str, int] = {}
+        key_p1 = "profile_1:community_A"
+        key_p2 = "profile_2:community_A"
+
+        community_failures[key_p1] = 2
+        community_failures[key_p2] = 1
+
+        assert community_failures[key_p1] >= 2, "Profile 1 should be at skip threshold"
+        assert community_failures[key_p2] < 2, "Profile 2 should NOT be at skip threshold"

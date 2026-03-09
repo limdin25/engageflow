@@ -5016,6 +5016,7 @@ def ensure_tables() -> None:
             """
         )
         db.execute("""CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY,value TEXT NOT NULL)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS skipped_posts (post_url TEXT NOT NULL,profile_id TEXT NOT NULL,reason TEXT NOT NULL,skipped_at TEXT NOT NULL,PRIMARY KEY (post_url, profile_id))""")
         # Stores identity history for deleted profiles to reconnect historical actions on re-add.
         db.execute(
             """
@@ -7535,6 +7536,148 @@ def automation_set_openai_key(payload: OpenAIKeyUpdateRequest, request: Request)
         json.dump(current_data, f, ensure_ascii=False, indent=2)
 
     return {"success": True, "isConfigured": True}
+
+
+# ---------------------------------------------------------------------------
+# Admin Dashboard Endpoints (FIX 3)
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/summary")
+async def admin_summary(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Profiles
+    profiles_out = []
+    with get_db() as db:
+        profile_rows = db.execute("SELECT id, name, email, status, dailyUsage FROM profiles").fetchall()
+        settings_row = db.execute("SELECT value FROM automation_settings WHERE key = 'default'").fetchone()
+        settings_data = json.loads(settings_row["value"]) if settings_row else {}
+        global_cap = int(settings_data.get("globalDailyCapPerAccount", 10) or 10)
+
+        for pr in profile_rows:
+            pid = str(pr["id"] or "")
+            # Count failures today from logs
+            fail_count = db.execute(
+                "SELECT COUNT(*) as cnt FROM logs WHERE profile = ? AND status = 'error' AND timestamp >= ?",
+                (str(pr["name"] or pr["email"] or pid), today_str),
+            ).fetchone()
+            # Last action
+            last_action = db.execute(
+                "SELECT timestamp FROM logs WHERE profile = ? AND status = 'success' ORDER BY rowid DESC LIMIT 1",
+                (str(pr["name"] or pr["email"] or pid),),
+            ).fetchone()
+            profiles_out.append({
+                "email": str(pr["email"] or pr["name"] or pid),
+                "actionsToday": int(pr["dailyUsage"] or 0),
+                "dailyCap": global_cap,
+                "status": str(pr["status"] or "unknown"),
+                "lastActionAt": str(last_action["timestamp"]) if last_action else None,
+                "failuresToday": int(fail_count["cnt"]) if fail_count else 0,
+            })
+
+        # Communities
+        community_rows = db.execute("SELECT id, profileId, name, dailyLimit, actionsToday, status FROM communities").fetchall()
+    communities_out = []
+    editor_failures = engine.get_community_editor_failures()
+    for cr in community_rows:
+        cid = str(cr["id"] or "")
+        pid = str(cr["profileId"] or "")
+        key = f"{pid}:{cid}"
+        fail_count = editor_failures.get(key, 0)
+        is_skipped = engine._is_community_skipped_today(pid, cid)
+        # Find profile email for display
+        profile_email = pid
+        for po in profiles_out:
+            if po["email"] and pid:
+                profile_email = po["email"]
+                break
+        communities_out.append({
+            "name": str(cr["name"] or cid),
+            "profile": profile_email,
+            "actionsToday": int(cr["actionsToday"] or 0),
+            "dailyCap": int(cr["dailyLimit"] or 2),
+            "editorFailures": fail_count,
+            "skippedToday": is_skipped,
+            "lastFailureReason": "editor_not_visible" if fail_count > 0 else None,
+        })
+
+    # Queue stats
+    with get_db() as db:
+        pending = db.execute("SELECT COUNT(*) as cnt FROM queue_items WHERE scheduledFor > ?", (now_iso,)).fetchone()
+        retrying = db.execute(
+            "SELECT COUNT(*) as cnt FROM queue_items"
+        ).fetchone()
+        total_queue = int(retrying["cnt"]) if retrying else 0
+        pending_count = int(pending["cnt"]) if pending else 0
+        failed_today = db.execute(
+            "SELECT COUNT(*) as cnt FROM logs WHERE status = 'error' AND timestamp >= ?",
+            (today_str,),
+        ).fetchone()
+
+    skipped_posts = engine._get_skipped_posts()
+    skipped_posts_out = []
+    for sp in skipped_posts:
+        skipped_posts_out.append({
+            "url": sp.get("post_url", ""),
+            "profile": sp.get("profile_id", ""),
+            "reason": sp.get("reason", ""),
+            "skippedAt": sp.get("skipped_at", ""),
+        })
+
+    return {
+        "profiles": profiles_out,
+        "communities": communities_out,
+        "queue": {
+            "pending": pending_count,
+            "retrying": total_queue - pending_count,
+            "skipped": len(skipped_posts),
+            "failedToday": int(failed_today["cnt"]) if failed_today else 0,
+        },
+        "skippedPosts": skipped_posts_out,
+    }
+
+
+@app.post("/admin/reset-community-failures")
+async def admin_reset_community_failures(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    community_id = body.get("communityId") if body else None
+    engine.reset_community_editor_failures(community_id)
+    return {"success": True}
+
+
+@app.post("/admin/unskip-post")
+async def admin_unskip_post(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    body = await request.json()
+    post_url = body.get("postUrl", "")
+    if post_url:
+        engine._remove_skipped_post(post_url)
+    return {"success": True}
+
+
+@app.post("/admin/clear-skipped-posts")
+async def admin_clear_skipped_posts(request: Request):
+    engine: AutomationEngine = get_automation_engine(request)
+    engine._clear_all_skipped_posts()
+    return {"success": True}
+
+
+@app.post("/admin/reset-daily-counts")
+async def admin_reset_daily_counts(request: Request):
+    with get_db() as db:
+        db.execute("UPDATE profiles SET dailyUsage = 0")
+        db.execute("UPDATE communities SET actionsToday = 0, matchesToday = 0")
+        db.commit()
+    engine: AutomationEngine = get_automation_engine(request)
+    engine.reset_community_editor_failures()
+    return {"success": True}
 
 
 ensure_tables()

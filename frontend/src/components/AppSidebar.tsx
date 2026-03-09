@@ -11,6 +11,7 @@ import {
   LogOut,
   ChevronDown,
   Zap,
+  Wrench,
 } from "lucide-react";
 import { useState } from "react";
 import { lock } from "@/lib/lockscreen";
@@ -24,6 +25,7 @@ const navItems = [
   { title: "Keywords & AI Rules", path: "/keywords", icon: Sparkles },
   { title: "Automation", path: "/automation", icon: Zap },
   { title: "Logs", path: "/logs", icon: ScrollText },
+  { title: "Admin", path: "/admin", icon: Wrench },
   { title: "Analytics", path: "/analytics", icon: BarChart3 },
 ];
 
