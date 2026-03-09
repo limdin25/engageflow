@@ -88,6 +88,12 @@ export interface QueueItem {
   countdown: number;
 }
 
+export interface QueueListResponse {
+  items: QueueItem[];
+  dailyCapExhausted: boolean;
+  nextResetAt: string;
+}
+
 export interface QueuePreviewItem extends QueueItem {
   isProjected: boolean;
   dayLabel: string;

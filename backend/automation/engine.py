@@ -1329,8 +1329,12 @@ class AutomationEngine:
                 int(settings.get("queuePrefillMaxPerProfilePerPass", QUEUE_PREFILL_MAX_PER_PROFILE_PER_PASS)),
             )
             prefill_target_total = max(1, len(enabled_profiles_for_prefill) * per_profile_prefill_limit)
-            # Refill only when queue is fully drained; then prefill all profiles in one pass.
-            should_prefill = bootstrap_queue_fill_required or queue_total == 0
+            # Refill when queue is below target — not only when fully drained.
+            should_prefill = (
+                bootstrap_queue_fill_required
+                or queue_total == 0
+                or queue_total < prefill_target_total
+            )
             if should_prefill:
                 async with self._lock:
                     scan_profiles = [dict(p) for p in self._state.profiles if p.get("enabled", True)]
@@ -3678,6 +3682,21 @@ class AutomationEngine:
                         break
                     # Keep queue prefill diverse: at most one new task per community per pass.
                     per_community_quota = min(1, target_quota)
+                    # Skip community entirely if it already has a pending queue item for this profile.
+                    _comm_id = str(community.get("id", "") or "").strip()
+                    if _comm_id and self._has_pending_queue_for_profile_community(str(profile_id or ""), _comm_id):
+                        _note_prefill_skip("already_queued")
+                        self._insert_log(
+                            {
+                                "id": str(uuid.uuid4()),
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                "profile": str(profile_label),
+                                "status": "info",
+                                "message": f"[SKOOL] Queue prefill skip: already_queued profile={profile_id} community={_comm_id}",
+                            }
+                        )
+                        comm_index = (comm_index + 1) % len(communities)
+                        continue
                     planned_count = 0
                     for idx, selected in enumerate(eligible_posts):
                         if planned_count >= per_community_quota:
@@ -3813,6 +3832,22 @@ class AutomationEngine:
                 return int(row["cnt"] if row and "cnt" in row.keys() else 0)
         except Exception:
             return 0
+
+    def _has_pending_queue_for_profile_community(self, profile_id: str, community_id: str) -> bool:
+        """Return True if queue_items has any row for this profile+community."""
+        pid = str(profile_id or "").strip()
+        cid = str(community_id or "").strip()
+        if not pid or not cid:
+            return False
+        try:
+            with self._db() as db:
+                row = db.execute(
+                    "SELECT 1 FROM queue_items WHERE profileId = ? AND communityId = ? LIMIT 1",
+                    (pid, cid),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            return False
 
     def _count_pending_queue_for_profile_community_today(self, profile_id: str, community_id: str) -> int:
         pid = str(profile_id or "").strip()

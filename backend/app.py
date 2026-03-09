@@ -5352,6 +5352,12 @@ class QueueItemModel(BaseModel):
     countdown: int
 
 
+class QueueListResponse(BaseModel):
+    items: List[QueueItemModel]
+    dailyCapExhausted: bool = False
+    nextResetAt: str = ""
+
+
 class QueueItemUpdateModel(BaseModel):
     profile: Optional[str] = None
     profileId: Optional[str] = None
@@ -6753,7 +6759,7 @@ def queue_preview(limit: int = 50, days: int = 2):
     return items
 
 
-@app.get("/queue", response_model=List[QueueItemModel])
+@app.get("/queue", response_model=QueueListResponse)
 def read_queue(profile_id: Optional[str] = None):
     query = "SELECT * FROM queue_items"
     params: List[Any] = []
@@ -6762,6 +6768,49 @@ def read_queue(profile_id: Optional[str] = None):
         params.append(profile_id)
     with get_db() as db:
         rows = db.execute(query + " ORDER BY julianday(scheduledFor) ASC, id ASC", params).fetchall()
+        # Compute dailyCapExhausted: every enabled community for every enabled
+        # profile has actionsToday >= dailyLimit AND queue has no real items.
+        daily_cap_exhausted = False
+        next_reset_at = ""
+        if not rows:
+            try:
+                settings_row = db.execute(
+                    "SELECT value FROM automation_settings WHERE key = 'default'"
+                ).fetchone()
+                _settings: Dict[str, Any] = {}
+                if settings_row:
+                    import json as _json
+                    _settings = _json.loads(settings_row["value"])
+                global_cap = max(1, int(_settings.get("globalDailyCapPerAccount", 5)))
+                enabled_profiles = db.execute(
+                    "SELECT id, dailyUsage FROM profiles WHERE status IN ('ready', 'running', 'idle')"
+                ).fetchall()
+                active_comms = db.execute(
+                    "SELECT profileId, dailyLimit, actionsToday FROM communities WHERE status = 'active'"
+                ).fetchall()
+                if enabled_profiles and active_comms:
+                    # Check profile caps
+                    all_profiles_capped = all(
+                        int(p["dailyUsage"] or 0) >= global_cap for p in enabled_profiles
+                    )
+                    # Check community caps (only communities with a dailyLimit > 0)
+                    comms_with_limit = [c for c in active_comms if int(c["dailyLimit"] or 0) > 0]
+                    all_comms_capped = (
+                        len(comms_with_limit) > 0
+                        and all(
+                            int(c["actionsToday"] or 0) >= int(c["dailyLimit"] or 0)
+                            for c in comms_with_limit
+                        )
+                    )
+                    daily_cap_exhausted = all_profiles_capped or all_comms_capped
+                if daily_cap_exhausted:
+                    now = datetime.now()
+                    midnight = (now + timedelta(days=1)).replace(
+                        hour=0, minute=0, second=5, microsecond=0
+                    )
+                    next_reset_at = midnight.isoformat(timespec="seconds")
+            except Exception:
+                pass
     ordered_rows = [dict(row) for row in rows]
     # Dashboard readability: interleave queue by profile while preserving
     # per-profile scheduled order to reflect round-robin intent.
@@ -6784,7 +6833,12 @@ def read_queue(profile_id: Optional[str] = None):
             took_any = True
         if not took_any:
             break
-    return [QueueItemModel(**_queue_row_to_api_payload(row)) for row in interleaved]
+    items = [QueueItemModel(**_queue_row_to_api_payload(row)) for row in interleaved]
+    return QueueListResponse(
+        items=items,
+        dailyCapExhausted=daily_cap_exhausted,
+        nextResetAt=next_reset_at,
+    )
 
 
 @app.put("/queue/{item_id}", response_model=QueueItemModel)

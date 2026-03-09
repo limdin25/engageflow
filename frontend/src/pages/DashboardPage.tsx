@@ -382,7 +382,10 @@ export default function DashboardPage() {
   const profiles = profilesQuery.data ?? [];
   const communities = communitiesQuery.data ?? [];
   const activityFeed = activityQuery.data ?? [];
-  const queue = queueQuery.data ?? [];
+  const queueResponse = queueQuery.data;
+  const queue = queueResponse?.items ?? [];
+  const dailyCapExhausted = queueResponse?.dailyCapExhausted ?? false;
+  const nextResetAt = queueResponse?.nextResetAt ?? "";
   const queuePreview = queuePreviewQuery.data ?? [];
   const adjustedQueueNowMs = Math.max(0, nowMs - queueTimerPauseOffsetMs);
   const activeTask = useMemo(() => deriveActiveQueueTask(logs, nowMs), [logs, nowMs]);
@@ -441,8 +444,6 @@ export default function DashboardPage() {
 
     return null;
   })();
-  const configuredRestRounds = Math.max(1, Number(settings?.roundsBeforeConnectionRest ?? connectionRest?.roundsBefore ?? 5));
-  const configuredRestMinutes = Math.max(1, Number(settings?.connectionRestMinutes ?? connectionRest?.restMinutes ?? 5));
 
   const formatCountdown = (seconds: number) => {
     const safe = Math.max(0, seconds || 0);
@@ -531,6 +532,18 @@ export default function DashboardPage() {
     ? Math.max(0, Math.floor((cached.targetMs - nowMs) / 1000))
     : -1;
 
+  // --- Compute time until next midnight reset (for daily cap exhausted display) ---
+  const resetSecondsLeft = (() => {
+    if (!nextResetAt) return secondsUntilNextMidnight;
+    try {
+      const resetMs = parseServerTimestamp(nextResetAt);
+      if (Number.isFinite(resetMs)) return Math.max(0, Math.floor((resetMs - nowMs) / 1000));
+    } catch { /* ignore */ }
+    return secondsUntilNextMidnight;
+  })();
+  const resetHours = Math.floor(resetSecondsLeft / 3600);
+  const resetMins = Math.floor((resetSecondsLeft % 3600) / 60);
+
   // --- Determine countdown display ---
   const nextCountdown = (() => {
     let source = "fallback";
@@ -538,7 +551,6 @@ export default function DashboardPage() {
 
     // 1. Initial loading — both status and queue must arrive first
     if (initialLoading) {
-      // Even during loading, use cache if available
       if (cacheSecondsLeft >= 0) {
         source = "cache-during-load";
         result = formatCountdown(cacheSecondsLeft);
@@ -569,7 +581,24 @@ export default function DashboardPage() {
       return "Executing";
     }
 
-    // 5. Positive server countdown — most authoritative live source
+    // 5. Daily cap exhausted AND queue empty — show reset time
+    if (dailyCapExhausted && queue.length === 0) {
+      source = "daily-cap-exhausted";
+      result = `Resets at midnight \u00B7 ${resetHours}h ${resetMins}m away`;
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, dailyCapExhausted, resetSecondsLeft });
+      return result;
+    }
+
+    // 6. Queue has items → time until earliest scheduledFor (authoritative)
+    if (queueSecondsLeft >= 0) {
+      updateCountdownCache(queueTargetMs);
+      source = "queue";
+      result = queueSecondsLeft > 0 ? formatCountdown(queueSecondsLeft) : "Starting\u2026";
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, queueSecondsLeft, queueTargetMs });
+      return result;
+    }
+
+    // 7. Server countdown > 0 (fallback when no queue items)
     if (serverCountdown > 0) {
       updateCountdownCache(serverTargetMs);
       source = "server";
@@ -578,16 +607,7 @@ export default function DashboardPage() {
       return result;
     }
 
-    // 6. Valid queue-based countdown (any value >= 0 when queue parsed OK)
-    if (queueSecondsLeft >= 0) {
-      updateCountdownCache(queueTargetMs);
-      source = "queue";
-      result = formatCountdown(queueSecondsLeft);
-      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, queueSecondsLeft, queueTargetMs });
-      return result;
-    }
-
-    // 7. Cached target within grace window
+    // 8. Cached target within grace window
     if (cacheSecondsLeft >= 0) {
       source = "cache";
       result = formatCountdown(cacheSecondsLeft);
@@ -595,13 +615,13 @@ export default function DashboardPage() {
       return result;
     }
 
-    // 8. Waiting-schedule state
+    // 9. Waiting-schedule state
     if (isWaitingSchedule) {
       if (import.meta.env.DEV) console.debug("[NextAction]", { source: "waiting-schedule" });
       return "\u2026";
     }
 
-    // 9. No queue items
+    // 10. No queue items
     if (!nextQueueItem) {
       source = "no-queue";
       result = emptyQueueReason || "\u2026";
@@ -609,7 +629,7 @@ export default function DashboardPage() {
       return result;
     }
 
-    // 10. Have a queue item but couldn't parse its time — transitional
+    // 11. Have a queue item but couldn't parse its time — transitional
     if (import.meta.env.DEV) console.debug("[NextAction]", { source: "unparseable-queue", scheduledFor: nextQueueItem.scheduledFor, scheduledTime: nextQueueItem.scheduledTime });
     return "\u2026";
   })();
@@ -760,7 +780,21 @@ export default function DashboardPage() {
               </div>
             </>
           ) : null}
-          {!connectionRest?.active && isWaitingSchedule ? (
+          {!connectionRest?.active && isEngineRunning && dailyCapExhausted && queue.length === 0 ? (
+            <>
+              <p className="text-xs text-muted-foreground mt-1">
+                Daily caps reached — all accounts exhausted for today
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Counters reset in {resetHours}h {resetMins}m
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <button onClick={() => setShowNextActions(true)} className="text-xs text-primary hover:text-primary/80 font-medium transition-colors inline-flex items-center gap-1">
+                  View Next Scheduled &gt;
+                </button>
+              </div>
+            </>
+          ) : !connectionRest?.active && isWaitingSchedule ? (
             <>
               <p className="text-xs text-muted-foreground mt-1">
                 Awaiting next schedule window ({formatCountdown(Math.max(0, Number(engineStatus?.countdownSeconds || 0)))})

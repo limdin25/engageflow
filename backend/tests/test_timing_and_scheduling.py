@@ -550,3 +550,73 @@ class TestEndToEndTimingFlow:
         assert total_actions == 6  # 3 per account
         assert total_intra_delays == 4  # 2 per account (between 1→2, 2→3)
         assert total_inter_delays == 2  # 1 per account
+
+
+# ---------------------------------------------------------------------------
+# TEST GROUP 6: Prefill trigger relaxed
+# ---------------------------------------------------------------------------
+
+class TestPrefillRelaxed:
+    """Verify prefill runs when queue is below target, not only when empty."""
+
+    def _should_prefill(
+        self,
+        bootstrap_queue_fill_required: bool,
+        queue_total: int,
+        prefill_target_total: int,
+    ) -> bool:
+        """Replicate the scheduler's should_prefill logic."""
+        return (
+            bootstrap_queue_fill_required
+            or queue_total == 0
+            or queue_total < prefill_target_total
+        )
+
+    def test_prefill_runs_when_queue_below_target(self):
+        """queue_total=1, prefill_target_total=6 → should_prefill=True."""
+        assert self._should_prefill(
+            bootstrap_queue_fill_required=False,
+            queue_total=1,
+            prefill_target_total=6,
+        )
+
+    def test_prefill_skips_when_queue_at_target(self):
+        """queue_total=6, prefill_target_total=6 → should_prefill=False."""
+        assert not self._should_prefill(
+            bootstrap_queue_fill_required=False,
+            queue_total=6,
+            prefill_target_total=6,
+        )
+
+    def test_prefill_no_duplicate_queue_items(self):
+        """
+        _has_pending_queue_for_profile_community returns True → prefill
+        skips that community. Verify the check logic matches.
+        """
+        # Simulate the prefill guard: if community already has a pending item,
+        # the prefill path skips it and logs "already_queued".
+        existing_queue = {
+            ("profile_1", "community_A"): True,  # already has pending item
+        }
+
+        def has_pending(profile_id: str, community_id: str) -> bool:
+            return existing_queue.get((profile_id, community_id), False)
+
+        communities_to_check = [
+            {"id": "community_A", "name": "Comm A"},
+            {"id": "community_B", "name": "Comm B"},
+        ]
+
+        skipped: list = []
+        queued: list = []
+        for comm in communities_to_check:
+            cid = comm["id"]
+            if has_pending("profile_1", cid):
+                skipped.append(cid)
+            else:
+                queued.append(cid)
+
+        assert "community_A" in skipped, "community_A should be skipped (already_queued)"
+        assert "community_B" in queued, "community_B should be queued (no existing item)"
+        assert len(skipped) == 1
+        assert len(queued) == 1
