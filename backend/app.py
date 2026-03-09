@@ -5890,6 +5890,22 @@ def release_browser_lock(profile_id: str):
         db.execute('DELETE FROM browser_locks WHERE profile_id = ?', (profile_id,))
         db.commit()
 
+# Build marker so we can verify deployed backend (e.g. after timing-fix deploy).
+ENGAGEFLOW_BUILD_VERSION = os.environ.get("ENGAGEFLOW_BUILD_VERSION", "timing-fix-2026-03")
+
+
+@app.get("/health/live")
+async def health_live():
+    """Liveness probe — always 200 if the process is up. No dependency on scheduler."""
+    return JSONResponse({"status": "ok"})
+
+
+@app.get("/api/version")
+async def api_version():
+    """Return build version so deploy can be verified (e.g. curl after Coolify redeploy)."""
+    return JSONResponse({"build": ENGAGEFLOW_BUILD_VERSION, "backend": "engageflow"})
+
+
 @app.get("/health")
 async def health_check(request: Request):
     engine: AutomationEngine = get_automation_engine(request)
