@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Users, MessageSquare, Sparkles, Clock, Activity, ChevronDown, ChevronUp, ExternalLink, Download, Key, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useActivity, useAutomationSettings, useCommunities, useProfiles, useQueue, useQueuePreview } from "@/hooks/useEngageFlow";
 import { ApiError, api } from "@/lib/api";
@@ -7,7 +7,7 @@ import { useBackend } from "@/context/BackendContext";
 import { toast } from "sonner";
 import type { LogEntry, QueueItem } from "@/lib/types";
 const UK_TIMEZONE = "Europe/London";
-const SERVER_TIMEZONE = "Europe/Berlin";
+const SERVER_TIMEZONE = "Europe/London";
 
 const getDatePartsInTz = (date: Date, timeZone: string): Record<string, number> => {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -149,14 +149,9 @@ function prettifyGroupName(rawGroupName: string, postUrl: string) {
 function parseQueueTimestampMs(scheduledFor: string, scheduledTime: string, nowMs: number) {
   const rawScheduledFor = String(scheduledFor || "").trim();
   if (rawScheduledFor) {
-    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(rawScheduledFor);
-    const looksIsoNoZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(rawScheduledFor);
-    const normalized = hasTimezone
-      ? rawScheduledFor
-      : looksIsoNoZone
-        ? rawScheduledFor.replace(" ", "T")
-        : rawScheduledFor;
-    const ts = Date.parse(normalized);
+    // Delegate to parseServerTimestamp which handles timezone-less ISO strings
+    // using SERVER_TIMEZONE (Europe/London) instead of the browser's local time.
+    const ts = parseServerTimestamp(rawScheduledFor);
     if (Number.isFinite(ts)) return ts;
   }
   const t = String(scheduledTime || "").trim();
@@ -167,11 +162,19 @@ function parseQueueTimestampMs(scheduledFor: string, scheduledTime: string, nowM
   const meridiem = String(tm[3] || "").toUpperCase();
   if (meridiem === "PM" && hour < 12) hour += 12;
   if (meridiem === "AM" && hour === 12) hour = 0;
-  const anchor = new Date(nowMs);
-  let localTs = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), hour, minute, 0, 0).getTime();
+  const nowParts = getDatePartsInTz(new Date(nowMs), SERVER_TIMEZONE);
+  const localTs = zonedToEpoch(
+    Number(nowParts.year || 0),
+    Number(nowParts.month || 1),
+    Number(nowParts.day || 1),
+    hour,
+    minute,
+    0,
+    SERVER_TIMEZONE,
+  );
   // If only HH:mm is available and today's slot already passed, assume next day.
   if (localTs <= nowMs) {
-    localTs += 24 * 60 * 60 * 1000;
+    return localTs + 24 * 60 * 60 * 1000;
   }
   return localTs;
 }
@@ -470,30 +473,145 @@ export default function DashboardPage() {
     }
   })();
 
-  const nextCountdown = (() => {
-    if (!engineStatus?.isRunning || engineStatus?.isPaused) return "Waiting for start";
-    if (connectionRest?.active) return formatCountdown(connectionRest.remainingSeconds);
-    if (isWaitingSchedule) {
-      const sec = Math.max(0, Number(engineStatus?.countdownSeconds ?? 0));
-      if (sec > 0) return formatCountdown(sec);
-      return "Starting...";
-    }
-    if (displayActiveTask) return "Executing";
-    if (!nextQueueItem) return emptyQueueReason || "--:--";
-    const scheduledMs = parseQueueTimestampMs(
+  // --- Loading: true until BOTH engineStatus and queue have arrived at least once ---
+  const statusLoading = engineStatus === null;
+  const queueHasLoaded = queueQuery.data != null || queuePreviewQuery.data != null;
+  const initialLoading = statusLoading || !queueHasLoaded;
+
+  // --- Server countdown (safe: never read if engineStatus is null) ---
+  const serverCountdown = engineStatus != null
+    ? Math.max(0, Number(engineStatus.countdownSeconds ?? 0))
+    : 0;
+
+  // --- Cached countdown target ---
+  // Persists in sessionStorage so it survives hard refresh.  Expires after GRACE_MS.
+  const COUNTDOWN_GRACE_MS = 10_000;
+  const [countdownCacheInit] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem("ef_cd_cache");
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p.targetMs === "number" && typeof p.setAt === "number") {
+          return p as { targetMs: number; setAt: number };
+        }
+      }
+    } catch { /* ignore */ }
+    return { targetMs: 0, setAt: 0 };
+  });
+  const countdownCacheRef = useRef(countdownCacheInit);
+
+  const updateCountdownCache = (targetMs: number) => {
+    const entry = { targetMs, setAt: Date.now() };
+    countdownCacheRef.current = entry;
+    try { sessionStorage.setItem("ef_cd_cache", JSON.stringify(entry)); } catch { /* ignore */ }
+  };
+
+  // --- Derived targets ---
+  const serverTargetMs = serverCountdown > 0 ? nowMs + serverCountdown * 1000 : 0;
+
+  const queueTargetMs = (() => {
+    if (!nextQueueItem) return 0;
+    const ms = parseQueueTimestampMs(
       String(nextQueueItem.scheduledFor || ""),
       String(nextQueueItem.scheduledTime || ""),
       adjustedQueueNowMs,
     );
-    if (Number.isFinite(scheduledMs)) {
-      const secondsLeft = Math.floor((scheduledMs - adjustedQueueNowMs) / 1000);
-      if (secondsLeft <= 0) {
-        return "Starting...";
+    return Number.isFinite(ms) ? ms : 0;
+  })();
+
+  const queueSecondsLeft = queueTargetMs > 0
+    ? Math.max(0, Math.floor((queueTargetMs - adjustedQueueNowMs) / 1000))
+    : -1;
+
+  // --- Countdown cache from sessionStorage (grace window) ---
+  const cached = countdownCacheRef.current;
+  const cacheAge = nowMs - cached.setAt;
+  const cacheValid = cached.targetMs > 0 && cacheAge < COUNTDOWN_GRACE_MS;
+  const cacheSecondsLeft = cacheValid
+    ? Math.max(0, Math.floor((cached.targetMs - nowMs) / 1000))
+    : -1;
+
+  // --- Determine countdown display ---
+  const nextCountdown = (() => {
+    let source = "fallback";
+    let result: string;
+
+    // 1. Initial loading — both status and queue must arrive first
+    if (initialLoading) {
+      // Even during loading, use cache if available
+      if (cacheSecondsLeft >= 0) {
+        source = "cache-during-load";
+        result = formatCountdown(cacheSecondsLeft);
+      } else {
+        source = "loading";
+        result = "\u2026";
       }
-      return formatCountdown(secondsLeft);
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, cacheAge: Math.round(cacheAge), statusLoading, queueHasLoaded });
+      return result;
     }
-    if ((engineStatus.countdownSeconds ?? 0) <= 0) return "Starting...";
-    return formatCountdown(engineStatus.countdownSeconds);
+
+    // 2. Not running / paused
+    if (!engineStatus!.isRunning || engineStatus!.isPaused) {
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source: "not-running" });
+      return "Waiting for start";
+    }
+
+    // 3. Connection rest active
+    if (connectionRest?.active) {
+      const sec = Math.max(0, Number(connectionRest.remainingSeconds ?? 0));
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source: "rest", sec });
+      return formatCountdown(sec);
+    }
+
+    // 4. Explicit active execution
+    if (displayActiveTask) {
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source: "executing" });
+      return "Executing";
+    }
+
+    // 5. Positive server countdown — most authoritative live source
+    if (serverCountdown > 0) {
+      updateCountdownCache(serverTargetMs);
+      source = "server";
+      result = formatCountdown(serverCountdown);
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, serverCountdown });
+      return result;
+    }
+
+    // 6. Valid queue-based countdown (any value >= 0 when queue parsed OK)
+    if (queueSecondsLeft >= 0) {
+      updateCountdownCache(queueTargetMs);
+      source = "queue";
+      result = formatCountdown(queueSecondsLeft);
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, queueSecondsLeft, queueTargetMs });
+      return result;
+    }
+
+    // 7. Cached target within grace window
+    if (cacheSecondsLeft >= 0) {
+      source = "cache";
+      result = formatCountdown(cacheSecondsLeft);
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, cacheSecondsLeft, cacheAge: Math.round(cacheAge) });
+      return result;
+    }
+
+    // 8. Waiting-schedule state
+    if (isWaitingSchedule) {
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source: "waiting-schedule" });
+      return "\u2026";
+    }
+
+    // 9. No queue items
+    if (!nextQueueItem) {
+      source = "no-queue";
+      result = emptyQueueReason || "\u2026";
+      if (import.meta.env.DEV) console.debug("[NextAction]", { source, result, emptyQueueReason });
+      return result;
+    }
+
+    // 10. Have a queue item but couldn't parse its time — transitional
+    if (import.meta.env.DEV) console.debug("[NextAction]", { source: "unparseable-queue", scheduledFor: nextQueueItem.scheduledFor, scheduledTime: nextQueueItem.scheduledTime });
+    return "\u2026";
   })();
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -696,9 +814,6 @@ export default function DashboardPage() {
                   : "Automation stopped"}
             </p>
           )}
-          <p className="text-[11px] text-muted-foreground mt-2">
-            Rest policy: every {configuredRestRounds} rounds, pause for {configuredRestMinutes} min.
-          </p>
         </div>
       </div>
 

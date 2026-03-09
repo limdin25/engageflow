@@ -44,7 +44,7 @@ QUEUE_NETWORK_FAIL_COOLDOWN_SECONDS = max(60, int(os.environ.get("QUEUE_NETWORK_
 QUEUE_NETWORK_MAX_BUDGET_EXHAUST_CYCLES = max(1, int(os.environ.get("QUEUE_NETWORK_MAX_BUDGET_EXHAUST_CYCLES", "3")))
 QUEUE_NETWORK_PERSISTENT_FAIL_COOLDOWN_SECONDS = max(300, int(os.environ.get("QUEUE_NETWORK_PERSISTENT_FAIL_COOLDOWN_SECONDS", "300")))
 QUEUE_COMMUNITY_NETWORK_COOLDOWN_SECONDS = max(60, int(os.environ.get("QUEUE_COMMUNITY_NETWORK_COOLDOWN_SECONDS", "600")))
-QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS = max(300, int(os.environ.get("QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS", "1800")))
+QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS = max(300, int(os.environ.get("QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS", "300")))
 AUTOMATION_NO_POST_WAIT_SECONDS = max(15, int(os.environ.get("AUTOMATION_NO_POST_WAIT_SECONDS", "75")))
 AUTOMATION_POSTED_WAIT_MIN_SECONDS = max(10, int(os.environ.get("AUTOMATION_POSTED_WAIT_MIN_SECONDS", "30")))
 PREFILL_SKIP_LOG_COOLDOWN_SECONDS = max(60, int(os.environ.get("PREFILL_SKIP_LOG_COOLDOWN_SECONDS", "900")))
@@ -1364,7 +1364,8 @@ class AutomationEngine:
                             daily_exhausted_wait_log_ts = now_ts
                             await self.publish_log(
                                 (
-                                    "[SKOOL] All in-schedule communities reached today's limits; "
+                                    "[SKOOL] All in-schedule communities reached today's limits "
+                                    f"(dailyCap={settings.get('globalDailyCapPerAccount', '?')} per profile); "
                                     f"waiting {wait_seconds}s for daily reset or settings changes"
                                 ),
                                 status="info",
