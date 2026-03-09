@@ -208,8 +208,7 @@ export default function AutomationPage() {
   }
   const isEngineStopped = !engineStatus?.isRunning;
   const resetTasksDisabledReason = "Stop automation to clear queued tasks.";
-  const configuredRestRounds = Math.max(1, Number(settings.roundsBeforeConnectionRest || 1));
-  const configuredRestMinutes = Math.max(1, Number(settings.connectionRestMinutes || 1));
+  void 0; // connection rest UI removed — feature is opt-in backend-only
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pt-16 md:pt-6 lg:pt-8 max-w-2xl">
@@ -301,9 +300,9 @@ export default function AutomationPage() {
             <SettingsInput type="number" value={settings.globalDailyCapPerAccount} onChange={(e) => update({ globalDailyCapPerAccount: toSafeNumber(e.target.value, settings.globalDailyCapPerAccount) })} />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Max Tasks Per Profile Per Round</label>
+            <label className="text-xs text-muted-foreground mb-1 block">Actions Per Account Per Pass</label>
             <p className="text-[11px] text-muted-foreground mb-1.5">
-              Queue prefill limit per profile for one scheduler pass (your current default is 2)
+              How many comment actions each account performs before switching to the next account
             </p>
             <SettingsInput
               type="number"
@@ -331,36 +330,6 @@ export default function AutomationPage() {
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Rounds Before Connection Rest</label>
-              <p className="text-[11px] text-muted-foreground mb-1.5 min-h-[2rem]">After this many full circles, automation pauses connection activity.</p>
-              <SettingsInput
-                type="number"
-                min={1}
-                value={settings.roundsBeforeConnectionRest}
-                onChange={(e) =>
-                  update({
-                    roundsBeforeConnectionRest: Math.max(1, toSafeNumber(e.target.value, settings.roundsBeforeConnectionRest)),
-                  })
-                }
-              />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Connection Rest (minutes)</label>
-              <p className="text-[11px] text-muted-foreground mb-1.5 min-h-[2rem]">How long to pause after each connection-rest trigger.</p>
-              <SettingsInput
-                type="number"
-                min={1}
-                value={settings.connectionRestMinutes}
-                onChange={(e) =>
-                  update({
-                    connectionRestMinutes: Math.max(1, toSafeNumber(e.target.value, settings.connectionRestMinutes)),
-                  })
-                }
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
               <label className="text-xs text-muted-foreground mb-1 block">Global Run Window From</label>
               <TimeInput id="run-from" value={settings.runFrom} onChange={(value) => updateAndSaveNow({ runFrom: value })} />
             </div>
@@ -368,12 +337,6 @@ export default function AutomationPage() {
               <label className="text-xs text-muted-foreground mb-1 block">Global Run Window To</label>
               <TimeInput id="run-to" value={settings.runTo} onChange={(value) => updateAndSaveNow({ runTo: value })} />
             </div>
-          </div>
-          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">
-              Current setup: pause after <span className="text-foreground font-medium">{configuredRestRounds}</span> rounds
-              for <span className="text-foreground font-medium">{configuredRestMinutes}</span> minutes.
-            </p>
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-2 block">Global Active Days</label>

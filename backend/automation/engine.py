@@ -46,7 +46,7 @@ QUEUE_NETWORK_PERSISTENT_FAIL_COOLDOWN_SECONDS = max(300, int(os.environ.get("QU
 QUEUE_COMMUNITY_NETWORK_COOLDOWN_SECONDS = max(60, int(os.environ.get("QUEUE_COMMUNITY_NETWORK_COOLDOWN_SECONDS", "600")))
 QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS = max(300, int(os.environ.get("QUEUE_EDITOR_NOT_VISIBLE_COOLDOWN_SECONDS", "1800")))
 AUTOMATION_NO_POST_WAIT_SECONDS = max(15, int(os.environ.get("AUTOMATION_NO_POST_WAIT_SECONDS", "75")))
-AUTOMATION_POSTED_WAIT_MIN_SECONDS = max(30, int(os.environ.get("AUTOMATION_POSTED_WAIT_MIN_SECONDS", "75")))
+AUTOMATION_POSTED_WAIT_MIN_SECONDS = max(10, int(os.environ.get("AUTOMATION_POSTED_WAIT_MIN_SECONDS", "30")))
 PREFILL_SKIP_LOG_COOLDOWN_SECONDS = max(60, int(os.environ.get("PREFILL_SKIP_LOG_COOLDOWN_SECONDS", "900")))
 PREFILL_SKIP_DEBUG_EVERY = max(5, int(os.environ.get("PREFILL_SKIP_DEBUG_EVERY", "20")))
 AUTOMATION_DUE_DEFER_MIN_SECONDS = max(5, int(os.environ.get("AUTOMATION_DUE_DEFER_MIN_SECONDS", "45")))
@@ -62,6 +62,36 @@ AUTOMATION_FAILURE_DIAGNOSTICS_ENABLED = str(
     os.environ.get("AUTOMATION_FAILURE_DIAGNOSTICS_ENABLED", "0")
 ).strip().lower() in {"1", "true", "yes", "on"}
 LOGGER = logging.getLogger("engageflow.automation")
+
+SKOOL_AUTH_CHECK_URL = "https://api2.skool.com/self/groups?offset=0&limit=1&prefs=false&members=true"
+
+
+def _validate_cookies_via_api(cookie_json: str) -> bool:
+    """Validate cookie_json via Skool API. Returns True if 2xx."""
+    if not cookie_json or not str(cookie_json).strip():
+        return False
+    try:
+        c = json.loads(cookie_json) if isinstance(cookie_json, str) else cookie_json
+        arr = c if isinstance(c, list) else [c]
+        cookie_header = "; ".join(
+            str(x.get("name", "")) + "=" + str(x.get("value", ""))
+            for x in arr
+            if x.get("name")
+        )
+        if not cookie_header:
+            return False
+        headers = {
+            "Cookie": cookie_header,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://www.skool.com",
+            "Referer": "https://www.skool.com/",
+        }
+        resp = requests.get(SKOOL_AUTH_CHECK_URL, headers=headers, timeout=12)
+        return 200 <= resp.status_code < 300
+    except Exception:
+        return False
+
 
 SKOOL_SELECTORS = {
     "post_items": 'div[class*="PostItemWrapper"]',
@@ -252,6 +282,17 @@ class SkoolSessionManager:
         with self.state_path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
+    def get_cookies_json(self) -> Optional[str]:
+        """Return browser cookies as JSON string (list of {name, value}) for API auth."""
+        if not self.context:
+            return None
+        try:
+            raw = self.context.cookies()
+            arr = [{"name": c.get("name", ""), "value": c.get("value", "")} for c in (raw or [])]
+            return json.dumps(arr) if arr else None
+        except Exception:
+            return None
+
     def detect_blocked(self) -> bool:
         try:
             content = self.page.content().lower()
@@ -275,6 +316,7 @@ class SkoolSessionManager:
             'a[href*="/chat?ch="]',
             'a[href^="/@"]',
             'div[class*="TopNav"]',
+            'div[class*="NotificationButtonWrapper"] button[type="button"]',
         ]
         try:
             for selector in markers:
@@ -455,7 +497,9 @@ class AutomationEngine:
                 "runState": self._state.run_state,
                 "countdownSeconds": self._state.countdown_seconds,
                 "connectionRest": {
-                    "active": bool(self._state.connection_rest_active),
+                    "active": bool(self._state.connection_rest_active) and str(
+                        self._state.global_settings.get("connectionRestEnabled", "false")
+                    ).strip().lower() in {"1", "true", "yes", "on"},
                     "remainingSeconds": int(self._state.connection_rest_remaining_seconds or 0),
                     "roundsBefore": int(self._state.connection_rest_rounds_before or 0),
                     "roundsCompleted": int(self._state.connection_rest_rounds_completed or 0),
@@ -665,8 +709,10 @@ class AutomationEngine:
             self._state.run_state = persisted.get("run_state", "running")
             self._state.current_profile_index = int(persisted.get("current_profile_index", 0))
             self._state.stats = persisted.get("stats", self._state.stats)
+            self._state.countdown_seconds = int(persisted.get("countdown_seconds", 0))
             self._state.profiles = restored
             self._state.global_settings = db_settings
+            shifted_on_recovery = self._reschedule_overdue_queue_items()
             self._task = asyncio.create_task(self._scheduler_loop(), name="automation-scheduler")
             self._session_task = (
                 asyncio.create_task(self._session_monitor_loop(), name="automation-session-monitor")
@@ -675,6 +721,9 @@ class AutomationEngine:
             )
 
         await self.publish_log("[SKOOL] Engine state recovered after restart", status="info")
+        if shifted_on_recovery > 0:
+            await self.publish_log(f"[SKOOL] Rescheduled {shifted_on_recovery} overdue queue task(s) after recovery", status="info")
+
     async def check_login(self, profile_id: str) -> Dict[str, Any]:
         profile = self._load_profile_for_session(profile_id)
         if not profile:
@@ -707,6 +756,9 @@ class AutomationEngine:
                         session_status = manager.validate_session()
                         if session_status == "valid":
                             manager.update_state("ready")
+                            cookie_json = manager.get_cookies_json()
+                            if cookie_json:
+                                self._save_profile_cookie_json(profile_id, cookie_json)
                             return {"success": True, "status": "ready", "message": "Session is active"}
                         if session_status == "blocked":
                             manager.update_state("blocked")
@@ -726,6 +778,9 @@ class AutomationEngine:
                             recheck = manager.validate_session()
                             if recheck == "valid":
                                 manager.update_state("ready")
+                                cookie_json = manager.get_cookies_json()
+                                if cookie_json:
+                                    self._save_profile_cookie_json(profile_id, cookie_json)
                                 return {"success": True, "status": "ready", "message": "Session is active"}
                         if login_result == "failed":
                             manager.update_state("logged_out")
@@ -741,6 +796,9 @@ class AutomationEngine:
                         # Fallback: if chat page has auth markers, treat as valid instead of generic failure.
                         if "/login" not in current_url and manager.has_authenticated_markers():
                             manager.update_state("ready")
+                            cookie_json = manager.get_cookies_json()
+                            if cookie_json:
+                                self._save_profile_cookie_json(profile_id, cookie_json)
                             return {"success": True, "status": "ready", "message": "Session is active"}
                         if "/login" in current_url:
                             manager.update_state("logged_out")
@@ -749,6 +807,12 @@ class AutomationEngine:
                                 "status": "invalid_credentials",
                                 "message": "Still on login page after login attempt",
                             }
+
+                        cookie_json = manager.get_cookies_json()
+                        if cookie_json and _validate_cookies_via_api(cookie_json):
+                            manager.update_state("ready")
+                            self._save_profile_cookie_json(profile_id, cookie_json)
+                            return {"success": True, "status": "ready", "message": "Session is active"}
 
                         manager.update_state("error")
                         return {
@@ -800,6 +864,96 @@ class AutomationEngine:
                 ),
             )
             return result
+
+    def run_profile_login_refresh_sync(self, profile_id: str) -> Dict[str, Any]:
+        """Sync refresh for ensure_profile_auth on 401/403. Performs login and returns cookie_json on success."""
+        profile = self._load_profile_for_session(profile_id)
+        if not profile:
+            return {"success": False, "status": "network_error", "message": "Profile not found", "cookie_json": None}
+        manager = SkoolSessionManager(
+            account_id=profile_id,
+            email=profile.get("email", ""),
+            password=profile.get("password", ""),
+            proxy=profile.get("proxy"),
+            base_dir=self.accounts_dir,
+            headless=True,
+        )
+        try:
+            with _PLAYWRIGHT_SYNC_LOCK:
+                manager.launch()
+                session_status = manager.validate_session()
+                if session_status == "valid":
+                    manager.update_state("ready")
+                    cookie_json = manager.get_cookies_json()
+                    if cookie_json:
+                        self._save_profile_cookie_json(profile_id, cookie_json)
+                    return {"success": True, "status": "ready", "message": "Session is active", "cookie_json": cookie_json or ""}
+                if session_status == "blocked":
+                    manager.update_state("blocked")
+                    return {"success": False, "status": "network_error", "message": "Account is blocked or access denied", "cookie_json": None}
+                if session_status == "captcha":
+                    manager.update_state("captcha")
+                    return {"success": False, "status": "captcha", "message": "Captcha required", "cookie_json": None}
+                if not profile.get("email") or not profile.get("password"):
+                    manager.update_state("logged_out")
+                    return {"success": False, "status": "invalid_credentials", "message": "Missing email or password", "cookie_json": None}
+                login_result = manager.perform_login()
+                manager.page.wait_for_timeout(2500)
+                if login_result == "success":
+                    recheck = manager.validate_session()
+                    if recheck == "valid":
+                        manager.update_state("ready")
+                        cookie_json = manager.get_cookies_json()
+                        if cookie_json:
+                            self._save_profile_cookie_json(profile_id, cookie_json)
+                        return {"success": True, "status": "ready", "message": "Session is active", "cookie_json": cookie_json or ""}
+                if login_result == "failed":
+                    manager.update_state("logged_out")
+                    return {"success": False, "status": "invalid_credentials", "message": "Credentials are invalid", "cookie_json": None}
+                if login_result == "captcha" or manager.detect_captcha():
+                    manager.update_state("captcha")
+                    return {"success": False, "status": "captcha", "message": "Captcha required", "cookie_json": None}
+                if login_result == "blocked" or manager.detect_blocked():
+                    manager.update_state("blocked")
+                    return {"success": False, "status": "network_error", "message": "Account is blocked or access denied", "cookie_json": None}
+                current_url = str(getattr(manager.page, "url", "") or "").lower()
+                if "/login" not in current_url and manager.has_authenticated_markers():
+                    manager.update_state("ready")
+                    cookie_json = manager.get_cookies_json()
+                    if cookie_json:
+                        self._save_profile_cookie_json(profile_id, cookie_json)
+                    return {"success": True, "status": "ready", "message": "Session is active", "cookie_json": cookie_json or ""}
+                if "/login" in current_url:
+                    manager.update_state("logged_out")
+                    return {"success": False, "status": "invalid_credentials", "message": "Still on login page after login attempt", "cookie_json": None}
+                cookie_json = manager.get_cookies_json()
+                if cookie_json and _validate_cookies_via_api(cookie_json):
+                    manager.update_state("ready")
+                    self._save_profile_cookie_json(profile_id, cookie_json)
+                    return {"success": True, "status": "ready", "message": "Session is active", "cookie_json": cookie_json}
+                manager.update_state("error")
+                return {
+                    "success": False,
+                    "status": "network_error",
+                    "message": "Could not validate chat session (chat page/auth markers not detected)",
+                    "cookie_json": None,
+                }
+        except Exception as exc:
+            err = str(exc)
+            low = err.lower()
+            if "err_proxy_connection_failed" in low or "proxy" in low:
+                manager.update_state("proxy_error", {"error": err})
+                return {"success": False, "status": "proxy_error", "message": "Proxy connection failed", "cookie_json": None}
+            if "timeout" in low:
+                manager.update_state("error", {"error": err})
+                return {"success": False, "status": "network_error", "message": "Network timeout while checking login", "cookie_json": None}
+            if "net::" in low or "network" in low or "dns" in low:
+                manager.update_state("error", {"error": err})
+                return {"success": False, "status": "network_error", "message": "Network error while checking login", "cookie_json": None}
+            manager.update_state("error", {"error": err})
+            return {"success": False, "status": "network_error", "message": err[:300] or "Unknown login check error", "cookie_json": None}
+        finally:
+            manager.close()
 
     async def check_proxy(self, profile_id: str) -> Dict[str, Any]:
         async with self._session_check_lock:
@@ -1120,12 +1274,15 @@ class AutomationEngine:
                 await self._countdown(10)
                 continue
 
+            connection_rest_enabled = str(
+                settings.get("connectionRestEnabled", "false")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             rounds_before_rest = max(1, int(settings.get("roundsBeforeConnectionRest", 5) or 5))
             rest_minutes = max(1, int(settings.get("connectionRestMinutes", 5) or 5))
             rest_seconds = rest_minutes * 60
 
             now_rest_ts = time.time()
-            if connection_rest_until_ts > now_rest_ts:
+            if connection_rest_enabled and connection_rest_until_ts > now_rest_ts:
                 remaining_rest = max(1, int(connection_rest_until_ts - now_rest_ts))
                 async with self._lock:
                     self._state.run_state = "resting_connections"
@@ -1376,7 +1533,13 @@ class AutomationEngine:
             had_due_for_profile_pass = False
             try:
                 profile_for_run = dict(profile)
-                profile_for_run["repliesPerVisit"] = 1
+                _replies = max(1, int(
+                    profile.get("repliesPerVisit")
+                    or settings.get("repliesPerVisit")
+                    or settings.get("queuePrefillMaxPerProfilePerPass")
+                    or 1
+                ))
+                profile_for_run["repliesPerVisit"] = _replies
                 run_result = await asyncio.to_thread(self._run_profile_automation_sync, profile_for_run, settings, False, 0)
                 comments_posted_this_pass = int(run_result.comments_posted or 0)
                 had_due_for_profile_pass = int(run_result.due_queue_items_seen or 0) > 0
@@ -1440,15 +1603,18 @@ class AutomationEngine:
                 else:
                     await self.publish_log(f"[SKOOL] Scheduler error: {err_text}", profile=label, status="error")
 
-            delay_min = max(30, int(profile.get("delayBetweenMessagesMinSec", profile.get("delay_min", settings.get("delayMin", 30)))))
+            delay_min = max(10, int(profile.get("delayBetweenMessagesMinSec", profile.get("delay_min", settings.get("delayMin", 30)))))
             delay_max = max(delay_min, int(profile.get("delayBetweenMessagesMaxSec", profile.get("delay_max", settings.get("delayMax", 90)))))
             if delay_max < delay_min:
                 delay_min, delay_max = delay_max, delay_min
             random_delay = random.randint(delay_min, delay_max)
-            # Keep idle profile passes from collapsing to very short loops.
-            # This avoids accidental high-frequency rotation across many accounts.
+            user_delay_min = max(10, int(
+                profile.get("delayBetweenMessagesMinSec")
+                or settings.get("delayMin")
+                or AUTOMATION_POSTED_WAIT_MIN_SECONDS
+            ))
             wait_seconds = (
-                max(AUTOMATION_POSTED_WAIT_MIN_SECONDS, random_delay)
+                max(user_delay_min, random_delay)
                 if comments_posted_this_pass > 0
                 else max(AUTOMATION_NO_POST_WAIT_SECONDS, random_delay)
             )
@@ -1482,7 +1648,7 @@ class AutomationEngine:
                     )
 
             rest_started_this_pass = False
-            if completed_rounds_since_rest >= rounds_before_rest:
+            if connection_rest_enabled and completed_rounds_since_rest >= rounds_before_rest:
                 due_pending_before_rest = await asyncio.to_thread(self._count_due_queue_actions)
                 queue_pending_before_rest = await asyncio.to_thread(self._count_all_queue_actions)
                 if due_pending_before_rest <= 0 and queue_pending_before_rest <= 0:
@@ -2897,6 +3063,21 @@ class AutomationEngine:
                                 page.wait_for_timeout(2000)
                             except Exception:
                                 pass
+                            # Intra-action delay between consecutive actions in the same pass.
+                            if replies_this_visit < replies_per_visit:
+                                intra_min = max(5, int(settings.get("intraActionDelayMinSec", 10)))
+                                intra_max = max(intra_min, int(settings.get("intraActionDelayMaxSec", 30)))
+                                intra_delay = random.randint(intra_min, intra_max)
+                                self._insert_log(
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                        "profile": str(profile_label),
+                                        "status": "info",
+                                        "message": f"[SKOOL] Intra-action delay: {intra_delay}s before next action ({replies_this_visit}/{replies_per_visit})",
+                                    }
+                                )
+                                time.sleep(intra_delay)
                             if community_daily_limit and community_actions_today >= community_daily_limit:
                                 break
                         except Exception as exc:
@@ -4228,6 +4409,13 @@ class AutomationEngine:
                 db.commit()
         self._write_with_retry(_op)
 
+    def _save_profile_cookie_json(self, profile_id: str, cookie_json: str) -> None:
+        def _op() -> None:
+            with self._db() as db:
+                db.execute("UPDATE profiles SET cookie_json = ? WHERE id = ?", (cookie_json, profile_id))
+                db.commit()
+        self._write_with_retry(_op)
+
     def _increment_profile_daily_usage(self, profile_id: Optional[str], amount: int) -> None:
         if not profile_id or amount <= 0:
             return
@@ -4572,6 +4760,7 @@ class AutomationEngine:
             "stats": self._state.stats,
             "run_state": self._state.run_state,
             "current_profile_index": self._state.current_profile_index,
+            "countdown_seconds": self._state.countdown_seconds,
             "last_updated": datetime.now().isoformat(),
         }
         with self.run_state_file.open("w", encoding="utf-8") as f:
@@ -4593,6 +4782,7 @@ class AutomationEngine:
         self._state.run_state = persisted.get("run_state", "idle")
         self._state.current_profile_index = int(persisted.get("current_profile_index", 0))
         self._state.stats = persisted.get("stats", self._state.stats)
+        self._state.countdown_seconds = int(persisted.get("countdown_seconds", 0))
 
     def _load_blacklist(self) -> Set[str]:
         if not self.blacklist_file.exists():
